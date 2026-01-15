@@ -24,4 +24,3 @@
 - python-telegram-bot
 - SQLite
 - API МойСклад
-
