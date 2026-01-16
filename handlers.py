@@ -861,3 +861,82 @@ class MenuHandlers:
         )
 
         return diagram
+
+    # добавляем метод для быстрого отчета
+    async def handle_quick_report(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Обработчик быстрого отчета"""
+        user = update.effective_user
+        logger.info(f"📊 Запрос быстрого отчета от пользователя {user.id}")
+
+        # Проверяем регистрацию
+        user_data = self.db.get_user(user.id)
+
+        if not user_data or not user_data.get('api_token_encrypted'):
+            await update.message.reply_text(
+                "❌ Сначала необходимо зарегистрироваться.\n"
+                "Используйте /start для регистрации.",
+                reply_markup=get_main_menu(user.id)
+            )
+            return
+
+        # Показываем сообщение о загрузке
+        loading_msg = await update.message.reply_text("⏳ Формируем быстрый отчет...")
+
+        try:
+            # Получаем и расшифровываем токен
+            encrypted_token = user_data['api_token_encrypted']
+            api_token = security.decrypt(encrypted_token)
+
+            if not api_token:
+                await update.message.reply_text(
+                    "❌ Ошибка расшифровки токена. Обновите API-токен в настройках.",
+                    reply_markup=get_settings_keyboard()
+                )
+                return
+
+            # Создаем API клиент и получаем отчет
+            api = MoyskladAPI(api_token)
+            quick_report = api.get_quick_report()
+
+            if quick_report:
+                # Форматируем и отправляем отчет
+                report_text = quick_report.format_quick_report()
+
+                await update.message.reply_text(
+                    report_text,
+                    parse_mode=ParseMode.MARKDOWN,
+                    reply_markup=get_main_menu(user.id)
+                )
+
+                # Логируем успешный запрос
+                self.db.log_request(user_data['id'], 'quick_report', 'today+week+month')
+                logger.info(f"✅ Быстрый отчет отправлен пользователю {user.id}")
+
+            else:
+                await update.message.reply_text(
+                    "❌ Не удалось получить данные для отчета.\n"
+                    "Возможные причины:\n"
+                    "• Нет данных в МойСклад за указанные периоды\n"
+                    "• Проблемы с подключением к API\n"
+                    "• Ошибка в настройках токена",
+                    reply_markup=get_main_menu(user.id)
+                )
+
+        except Exception as e:
+            logger.error(f"❌ Ошибка при получении быстрого отчета: {e}", exc_info=True)
+            await update.message.reply_text(
+                f"❌ Произошла ошибка при формировании отчета:\n\n"
+                f"```{str(e)[:150]}```",
+                parse_mode=ParseMode.MARKDOWN,
+                reply_markup=get_main_menu(user.id)
+            )
+
+        finally:
+            # Удаляем сообщение о загрузке
+            try:
+                await context.bot.delete_message(
+                    chat_id=update.effective_chat.id,
+                    message_id=loading_msg.message_id
+                )
+            except:
+                pass

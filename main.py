@@ -144,7 +144,13 @@ def setup_handlers(application, db):
     application.add_handler(registration_handler)
     application.add_handler(token_update_handler)
 
+    # Обработчик быстрого отчета
+    application.add_handler(MessageHandler(
+        filters.Regex('^(📊 Быстрый отчет)$'), menu.handle_quick_report
+    ))
+
     # Обработчики отчетов
+
     application.add_handler(MessageHandler(
         filters.Regex('^(📅 Сегодня)$'), menu.get_today_report
     ))

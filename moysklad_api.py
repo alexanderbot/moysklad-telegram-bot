@@ -109,6 +109,62 @@ class CombinedSalesReport:
         )
 
 
+@dataclass
+class QuickReport:
+    """Структура для быстрого отчета по трем периодам с итогами"""
+    today_date: str
+    week_period: str
+    month_name: str
+    today_data: Dict
+    week_data: Dict
+    month_data: Dict
+
+    def format_quick_report(self) -> str:
+        """Форматирование быстрого отчета в Telegram-сообщение"""
+        # Рассчитываем итоговые суммы
+        today_total = self.today_data['retail_sales'] + self.today_data['order_sales']
+        week_total = self.week_data['retail_sales'] + self.week_data['order_sales']
+        month_total = self.month_data['retail_sales'] + self.month_data['order_sales']
+
+        # Рассчитываем проценты для каждого канала
+        today_retail_percent = (self.today_data['retail_sales'] / today_total * 100) if today_total > 0 else 0
+        today_orders_percent = (self.today_data['order_sales'] / today_total * 100) if today_total > 0 else 0
+
+        week_retail_percent = (self.week_data['retail_sales'] / week_total * 100) if week_total > 0 else 0
+        week_orders_percent = (self.week_data['order_sales'] / week_total * 100) if week_total > 0 else 0
+
+        month_retail_percent = (self.month_data['retail_sales'] / month_total * 100) if month_total > 0 else 0
+        month_orders_percent = (self.month_data['order_sales'] / month_total * 100) if month_total > 0 else 0
+
+        report = f"📊 *БЫСТРЫЙ ОТЧЕТ за {self.month_name}*\n"
+        report += "=" * 40 + "\n\n"
+
+        # Сегодня
+        report += f"*Сегодня ({self.today_date}):*\n"
+        report += f"🛍 Розничные продажи: {self.today_data['retail_sales']:,.2f} ₽ ({today_retail_percent:.1f}%)\n"
+        report += f"   Количество продаж: {self.today_data.get('retail_count', '—')}\n"
+        report += f"📦 Заказы покупателей: {self.today_data['order_sales']:,.2f} ₽ ({today_orders_percent:.1f}%)\n"
+        report += f"   Количество заказов: {self.today_data.get('order_count', '—')}\n"
+        report += f"💰 *Итого за день:* {today_total:,.2f} ₽\n\n"
+
+        # Неделя
+        report += f"*Текущая неделя ({self.week_period}):*\n"
+        report += f"🛍 Розничные продажи: {self.week_data['retail_sales']:,.2f} ₽ ({week_retail_percent:.1f}%)\n"
+        report += f"   Количество продаж: {self.week_data.get('retail_count', '—')}\n"
+        report += f"📦 Заказы покупателей: {self.week_data['order_sales']:,.2f} ₽ ({week_orders_percent:.1f}%)\n"
+        report += f"   Количество заказов: {self.week_data.get('order_count', '—')}\n"
+        report += f"💰 *Итого за неделю:* {week_total:,.2f} ₽\n\n"
+
+        # Месяц
+        report += f"*Текущий месяц ({self.month_name}):*\n"
+        report += f"🛍 Розничные продажи: {self.month_data['retail_sales']:,.2f} ₽ ({month_retail_percent:.1f}%)\n"
+        report += f"   Количество продаж: {self.month_data.get('retail_count', '—')}\n"
+        report += f"📦 Заказы покупателей: {self.month_data['order_sales']:,.2f} ₽ ({month_orders_percent:.1f}%)\n"
+        report += f"   Количество заказов: {self.month_data.get('order_count', '—')}\n"
+        report += f"💰 *Итого за месяц:* {month_total:,.2f} ₽\n\n"
+
+        return report
+
 class MoyskladAPI:
     """Класс для работы с API МойСклад"""
 
@@ -512,6 +568,70 @@ class MoyskladAPI:
             orders_share=orders_share
         )
 
+    def get_quick_report(self) -> Optional[QuickReport]:
+        """
+        Получение быстрого отчета за три периода:
+        1. Сегодня
+        2. Текущая неделя
+        3. Текущий месяц
+        """
+        logger.info("🚀 Формирование быстрого отчета...")
+
+        # Получаем даты для всех периодов
+        today_from, today_to = get_period_dates('today')
+        week_from, week_to = get_period_dates('week')
+        month_from, month_to = get_period_dates('month')
+
+        # Форматируем даты для отображения
+        today_date = datetime.now().strftime('%d.%m.%Y')
+        week_period = f"{week_from} - {week_to}"
+        month_name = datetime.now().strftime('%B %Y')
+
+        try:
+            # Получаем данные для каждого периода
+            # Сегодня
+            today_retail = self.get_retail_sales_report(today_from, today_to)
+            today_orders = self.get_sales_report(today_from, today_to)
+
+            # Неделя
+            week_retail = self.get_retail_sales_report(week_from, week_to)
+            week_orders = self.get_sales_report(week_from, week_to)
+
+            # Месяц
+            month_retail = self.get_retail_sales_report(month_from, month_to)
+            month_orders = self.get_sales_report(month_from, month_to)
+
+            # Формируем структуру отчета с ВСЕМИ данными
+            quick_report = QuickReport(
+                today_date=today_date,
+                week_period=week_period,
+                month_name=month_name,
+                today_data={
+                    'retail_sales': today_retail.total_sales if today_retail else 0,
+                    'retail_count': today_retail.total_orders if today_retail else 0,
+                    'order_sales': today_orders.total_sales if today_orders else 0,
+                    'order_count': today_orders.total_orders if today_orders else 0
+                },
+                week_data={
+                    'retail_sales': week_retail.total_sales if week_retail else 0,
+                    'retail_count': week_retail.total_orders if week_retail else 0,
+                    'order_sales': week_orders.total_sales if week_orders else 0,
+                    'order_count': week_orders.total_orders if week_orders else 0
+                },
+                month_data={
+                    'retail_sales': month_retail.total_sales if month_retail else 0,
+                    'retail_count': month_retail.total_orders if month_retail else 0,
+                    'order_sales': month_orders.total_sales if month_orders else 0,
+                    'order_count': month_orders.total_orders if month_orders else 0
+                }
+            )
+
+            logger.info(f"✅ Быстрый отчет сформирован")
+            return quick_report
+
+        except Exception as e:
+            logger.error(f"❌ Ошибка формирования быстрого отчета: {e}")
+            return None
 
 
 
