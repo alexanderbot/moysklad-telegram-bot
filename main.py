@@ -185,6 +185,27 @@ def setup_handlers(application, db):
         filters.Regex('^(🔙 Назад)$'), menu.handle_back
     ))
 
+    # Обработчики детализированных отчетов
+    application.add_handler(MessageHandler(
+        filters.Regex('^(📊 Детальные отчеты)$'), menu.show_detailed_reports_menu
+    ))
+
+    application.add_handler(MessageHandler(
+        filters.Regex('^(🛍 Розничные продажи)$'), menu.handle_retail_sales_report
+    ))
+
+    application.add_handler(MessageHandler(
+        filters.Regex('^(📦 Заказы покупателей)$'), menu.get_today_report  # Используем существующий
+    ))
+
+    application.add_handler(MessageHandler(
+        filters.Regex('^(📊 Объединенный отчет)$'), menu.handle_combined_report
+    ))
+
+    # Обновляем главное меню
+    application.add_handler(MessageHandler(
+        filters.Regex('^(📅 Быстрый отчет)$'), menu.get_today_report
+    ))
     # Обработка кнопки установки токена
     application.add_handler(MessageHandler(
         filters.Regex('^(🔑 Установить API-токен)$'), auth.start_auth

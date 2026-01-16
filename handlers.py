@@ -7,7 +7,7 @@ from moysklad_api import MoyskladAPI, get_period_dates, AnalyticsCalculator, Moy
 from security import security
 import asyncio
 from datetime import datetime, timedelta
-
+from moysklad_api import RetailSalesReport, CombinedSalesReport
 from database import Database
 from security import security
 from keyboards import (
@@ -16,7 +16,8 @@ from keyboards import (
     get_report_keyboard,
     get_settings_keyboard,
     get_back_keyboard,
-    get_analytics_keyboard
+    get_analytics_keyboard,
+    get_detailed_reports_keyboard
 )
 
 logger = logging.getLogger(__name__)
@@ -652,3 +653,211 @@ class MenuHandlers:
                 )
             except:
                 pass
+
+    async def show_detailed_reports_menu(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Показать меню детализированных отчетов"""
+        user = update.effective_user
+        user_data = self.db.get_user(user.id)
+
+        if not user_data or not user_data.get('api_token_encrypted'):
+            await update.message.reply_text(
+                "❌ Сначала необходимо зарегистрироваться и указать API-токен.",
+                reply_markup=get_main_menu()
+            )
+            return
+
+        await update.message.reply_text(
+            "📊 *Детализированные отчеты*\n\n"
+            "Выберите тип отчета:",
+            reply_markup=get_detailed_reports_keyboard(),
+            parse_mode=ParseMode.MARKDOWN
+        )
+
+    async def handle_retail_sales_report(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Обработка отчета по розничным продажам"""
+        await self._get_retail_report(update, context, 'today')
+
+    async def handle_combined_report(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Обработка объединенного отчета"""
+        await self._get_combined_report(update, context, 'today')
+
+    async def _get_retail_report(self, update: Update, context: ContextTypes.DEFAULT_TYPE, period_type: str):
+        """Получение отчета по розничным продажам"""
+        user = update.effective_user
+        user_data = self.db.get_user(user.id)
+
+        if not user_data or not user_data.get('api_token_encrypted'):
+            await update.message.reply_text(
+                "❌ Сначала необходимо зарегистрироваться.",
+                reply_markup=get_main_menu()
+            )
+            return
+
+        encrypted_token = user_data['api_token_encrypted']
+        api_token = security.decrypt(encrypted_token)
+
+        if not api_token:
+            await update.message.reply_text(
+                "❌ Ошибка расшифровки токена.",
+                reply_markup=get_settings_keyboard()
+            )
+            return
+
+        loading_msg = await update.message.reply_text("⏳ Загружаем данные по розничным продажам...")
+
+        try:
+            api = MoyskladAPI(api_token)
+            date_from, date_to = get_period_dates(period_type)
+
+            report = api.get_retail_sales_report(date_from, date_to)
+
+            if report:
+                if report.total_orders > 0:
+                    # Основной отчет
+                    report_text = report.format_retail_report()
+                    await update.message.reply_text(
+                        report_text,
+                        parse_mode=ParseMode.MARKDOWN,
+                        reply_markup=get_detailed_reports_keyboard()
+                    )
+
+                    # Детали по торговым точкам (если есть)
+                    if report.retail_points:
+                        points_text = "🏪 *Топ торговых точек:*\n\n"
+                        for i, point in enumerate(report.retail_points[:5], 1):
+                            points_text += f"{i}. *{point['name']}*\n"
+                            points_text += f"   💰 {point['sales']:,.2f} ₽ ({point['share']:.1f}%)\n"
+
+                        await update.message.reply_text(
+                            points_text,
+                            parse_mode=ParseMode.MARKDOWN
+                        )
+
+                    # Последние операции
+                    if report.details:
+                        details_text = "📋 *Последние операции:*\n\n"
+                        for detail in report.details[:5]:
+                            sign = "➖" if detail['sum'] < 0 else "➕"
+                            details_text += f"{sign} {detail['name']}\n"
+                            details_text += f"   💰 {abs(detail['sum']):,.2f} ₽ | 🏪 {detail.get('store', 'Не указано')}\n"
+                            details_text += f"   📅 {detail.get('date', '')} | 📊 {detail.get('type', '')}\n\n"
+
+                        await update.message.reply_text(
+                            details_text,
+                            parse_mode=ParseMode.MARKDOWN
+                        )
+
+                    # Логируем запрос
+                    self.db.log_request(user_data['id'], 'retail_sales', f"{date_from} - {date_to}")
+
+                else:
+                    await update.message.reply_text(
+                        f"📭 Нет розничных продаж за период: {report.period}",
+                        reply_markup=get_detailed_reports_keyboard()
+                    )
+            else:
+                await update.message.reply_text(
+                    "❌ Не удалось получить данные по розничным продажам.",
+                    reply_markup=get_detailed_reports_keyboard()
+                )
+
+        except Exception as e:
+            logger.error(f"Ошибка при получении отчета по розничным продажам: {e}")
+            await update.message.reply_text(
+                f"❌ Ошибка: {str(e)[:100]}",
+                reply_markup=get_detailed_reports_keyboard()
+            )
+
+        finally:
+            try:
+                await context.bot.delete_message(
+                    chat_id=update.effective_chat.id,
+                    message_id=loading_msg.message_id
+                )
+            except:
+                pass
+
+    async def _get_combined_report(self, update: Update, context: ContextTypes.DEFAULT_TYPE, period_type: str):
+        """Получение объединенного отчета"""
+        user = update.effective_user
+        user_data = self.db.get_user(user.id)
+
+        if not user_data or not user_data.get('api_token_encrypted'):
+            await update.message.reply_text(
+                "❌ Сначала необходимо зарегистрироваться.",
+                reply_markup=get_main_menu()
+            )
+            return
+
+        encrypted_token = user_data['api_token_encrypted']
+        api_token = security.decrypt(encrypted_token)
+
+        if not api_token:
+            await update.message.reply_text(
+                "❌ Ошибка расшифровки токена.",
+                reply_markup=get_settings_keyboard()
+            )
+            return
+
+        loading_msg = await update.message.reply_text("⏳ Формируем объединенный отчет...")
+
+        try:
+            api = MoyskladAPI(api_token)
+            date_from, date_to = get_period_dates(period_type)
+
+            report = api.get_combined_sales_report(date_from, date_to)
+
+            if report:
+                report_text = report.format_combined_report()
+
+                await update.message.reply_text(
+                    report_text,
+                    parse_mode=ParseMode.MARKDOWN,
+                    reply_markup=get_detailed_reports_keyboard()
+                )
+
+                # Добавляем текстовую диаграмму для наглядности
+                diagram = self._generate_sales_diagram(report.retail_share, report.orders_share)
+                await update.message.reply_text(
+                    f"📊 *Распределение продаж:*\n\n{diagram}",
+                    parse_mode=ParseMode.MARKDOWN
+                )
+
+                # Логируем запрос
+                self.db.log_request(user_data['id'], 'combined_sales', f"{date_from} - {date_to}")
+
+            else:
+                await update.message.reply_text(
+                    "❌ Не удалось сформировать объединенный отчет.",
+                    reply_markup=get_detailed_reports_keyboard()
+                )
+
+        except Exception as e:
+            logger.error(f"Ошибка при получении объединенного отчета: {e}")
+            await update.message.reply_text(
+                f"❌ Ошибка: {str(e)[:100]}",
+                reply_markup=get_detailed_reports_keyboard()
+            )
+
+        finally:
+            try:
+                await context.bot.delete_message(
+                    chat_id=update.effective_chat.id,
+                    message_id=loading_msg.message_id
+                )
+            except:
+                pass
+
+    def _generate_sales_diagram(self, retail_share: float, orders_share: float) -> str:
+        """Генерация текстовой диаграммы распределения продаж"""
+        bar_length = 20
+        retail_bars = int((retail_share / 100) * bar_length)
+        orders_bars = bar_length - retail_bars
+
+        diagram = (
+            f"🛍 Розничные: {'█' * retail_bars}{'░' * orders_bars} {retail_share:.1f}%\n"
+            f"📦 Заказы:    {'░' * retail_bars}{'█' * orders_bars} {orders_share:.1f}%\n"
+            f"              {'1' + ' ' * (bar_length - 2) + str(bar_length)}"
+        )
+
+        return diagram

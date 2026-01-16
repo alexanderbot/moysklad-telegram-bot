@@ -1,8 +1,8 @@
 import requests
 import logging
 from datetime import datetime, timedelta
-from typing import Dict, List, Optional, Any
-from dataclasses import dataclass
+from typing import Dict, List, Optional, Any, Tuple
+from dataclasses import dataclass, field
 import json
 
 logger = logging.getLogger(__name__)
@@ -37,6 +37,75 @@ class MoyskladReport:
             f"📦 *Количество заказов:* {self.total_orders}\n"
             f"🧮 *Средний чек:* {self.average_order:,.2f} ₽\n"
             f"📈 *Товаров продано:* {self.products_count}\n"
+        )
+
+@dataclass
+class RetailSalesReport(MoyskladReport):
+    """Отчет по розничным продажам с детализацией"""
+    retail_points: List[Dict] = field(default_factory=list)  # Торговые точки
+    cashiers: List[Dict] = field(default_factory=list)  # Кассиры
+    returns_count: int = 0  # Количество возвратов
+    returns_sum: float = 0.0  # Сумма возвратов
+
+    def format_retail_report(self) -> str:
+        """Форматирование отчета по розничным продажам"""
+        net_sales = self.total_sales - self.returns_sum
+
+        report = (
+            f"🛍 *Розничные продажи за {self.period}*\n\n"
+            f"💰 *Общая сумма продаж:* {self.total_sales:,.2f} ₽\n"
+            f"📦 *Количество чеков:* {self.total_orders}\n"
+            f"🧮 *Средний чек:* {self.average_order:,.2f} ₽\n"
+            f"📊 *Товаров продано:* {self.products_count}\n"
+        )
+
+        if self.returns_sum > 0:
+            report += (
+                f"\n🔄 *Возвраты:*\n"
+                f"   Количество: {self.returns_count}\n"
+                f"   Сумма: {self.returns_sum:,.2f} ₽\n"
+                f"   *Чистые продажи:* {net_sales:,.2f} ₽\n"
+            )
+
+        if self.retail_points:
+            report += f"\n🏪 *Торговых точек:* {len(self.retail_points)}"
+
+        if self.cashiers:
+            report += f"\n👤 *Кассиров:* {len(self.cashiers)}"
+
+        return report
+
+
+@dataclass
+class CombinedSalesReport:
+    """Объединенный отчет: розничные продажи + заказы покупателей"""
+    period: str
+    retail: RetailSalesReport
+    orders: MoyskladReport
+    combined_total: float
+    combined_orders: int
+    retail_share: float  # Доля розничных продаж в %
+    orders_share: float  # Доля заказов в %
+
+    def format_combined_report(self) -> str:
+        """Форматирование объединенного отчета"""
+        return (
+            f"📊 *СВОДНЫЙ ОТЧЕТ за {self.period}*\n\n"
+            f"💰 *ОБЩАЯ СУММА:* {self.combined_total:,.2f} ₽\n\n"
+
+            f"🛍 *Розничные продажи:*\n"
+            f"   Сумма: {self.retail.total_sales:,.2f} ₽ ({self.retail_share:.1f}%)\n"
+            f"   Чеки: {self.retail.total_orders} шт\n"
+            f"   Средний чек: {self.retail.average_order:,.2f} ₽\n\n"
+
+            f"📦 *Заказы покупателей:*\n"
+            f"   Сумма: {self.orders.total_sales:,.2f} ₽ ({self.orders_share:.1f}%)\n"
+            f"   Заказы: {self.orders.total_orders} шт\n"
+            f"   Средний заказ: {self.orders.average_order:,.2f} ₽\n\n"
+
+            f"📈 *Сравнение:*\n"
+            f"   Всего операций: {self.combined_orders}\n"
+            f"   Средний чек (общий): {self.combined_total / self.combined_orders:,.2f} ₽\n"
         )
 
 
@@ -265,6 +334,185 @@ class MoyskladAPI:
             return response.status_code == 200
         except:
             return False
+
+    def get_retail_sales_report(self, date_from: str, date_to: str) -> Optional[RetailSalesReport]:
+        """
+        Получение отчета по розничным продажам за период
+        Эндпоинт: entity/retaildemand
+        """
+        logger.info(f"📊 Запрос отчета по розничным продажам с {date_from} по {date_to}")
+
+        # Основные параметры для розничных продаж
+        params = {
+            "filter": f"moment>={date_from} 00:00:00;moment<={date_to} 23:59:59",
+            "limit": 1000,
+            "order": "moment,desc",
+            "expand": "retailStore,retailShift"  # Получаем информацию о точке и смене
+        }
+
+        endpoint = "entity/retaildemand"
+        logger.info(f"🌐 Запрос розничных продаж: {endpoint}")
+
+        data = self._make_request(endpoint, params)
+
+        if not data or 'rows' not in data:
+            logger.error("❌ Нет данных по розничным продажам")
+            return None
+
+        retail_demands = data['rows']
+        logger.info(f"✅ Получено розничных продаж: {len(retail_demands)}")
+
+        # Также получаем возвраты (retailsalesreturn)
+        returns_params = {
+            "filter": f"moment>={date_from} 00:00:00;moment<={date_to} 23:59:59",
+            "limit": 1000
+        }
+
+        returns_data = self._make_request("entity/retailsalesreturn", returns_params)
+        returns = returns_data.get('rows', []) if returns_data else []
+        logger.info(f"🔄 Найдено возвратов: {len(returns)}")
+
+        # Обработка данных
+        total_sales = 0
+        returns_sum = 0
+        retail_points = {}
+        cashiers = {}
+        details = []
+
+        # Обрабатываем розничные продажи
+        for demand in retail_demands:
+            demand_sum = demand.get('sum', 0) / 100
+            total_sales += demand_sum
+
+            # Информация о торговой точке
+            store = demand.get('retailStore', {})
+            store_name = store.get('name', 'Не указана')
+            retail_points[store_name] = retail_points.get(store_name, 0) + demand_sum
+
+            # Информация о кассире/смене
+            shift = demand.get('retailShift', {})
+            cashier_info = {
+                'name': demand.get('name', 'Без номера'),
+                'store': store_name,
+                'sum': demand_sum
+            }
+
+            if shift:
+                cashier_info['shift'] = shift.get('name', 'Без смены')
+
+            cashiers[demand.get('id')] = cashier_info
+
+            # Добавляем детали
+            details.append({
+                'id': demand.get('id'),
+                'name': demand.get('name', 'Без номера'),
+                'sum': demand_sum,
+                'date': demand.get('moment', '')[:10],
+                'store': store_name,
+                'type': 'Розничная продажа'
+            })
+
+        # Обрабатываем возвраты
+        for return_item in returns:
+            return_sum = abs(return_item.get('sum', 0) / 100)  # Сумма возврата отрицательная
+            returns_sum += return_sum
+
+            details.append({
+                'id': return_item.get('id'),
+                'name': return_item.get('name', 'Без номера'),
+                'sum': -return_sum,  # Отрицательная сумма
+                'date': return_item.get('moment', '')[:10],
+                'store': return_item.get('retailStore', {}).get('name', 'Не указана'),
+                'type': 'Возврат'
+            })
+
+        # Подсчет товаров (упрощенно)
+        products_count = 0
+        for demand in retail_demands:
+            positions = self.get_retail_positions(demand.get('id'))
+            if positions:
+                for pos in positions:
+                    products_count += pos.get('quantity', 0)
+
+        total_orders = len(retail_demands)
+        average_order = total_sales / total_orders if total_orders > 0 else 0
+
+        # Форматируем торговые точки для отчета
+        retail_points_list = []
+        for store_name, store_sales in retail_points.items():
+            retail_points_list.append({
+                'name': store_name,
+                'sales': store_sales,
+                'share': (store_sales / total_sales * 100) if total_sales > 0 else 0
+            })
+
+        # Сортируем точки по объему продаж
+        retail_points_list.sort(key=lambda x: x['sales'], reverse=True)
+
+        logger.info(f"📈 Розничные продажи: сумма={total_sales:.2f} ₽, чеков={total_orders}")
+
+        period = f"{date_from} - {date_to}" if date_from != date_to else date_from
+
+        return RetailSalesReport(
+            period=period,
+            total_sales=total_sales,
+            total_orders=total_orders,
+            average_order=average_order,
+            products_count=products_count,
+            details=details[:15],  # Ограничиваем детали
+            retail_points=retail_points_list[:10],  # Топ-10 точек
+            cashiers=list(cashiers.values())[:10],  # Топ-10 кассиров
+            returns_count=len(returns),
+            returns_sum=returns_sum
+        )
+
+    def get_retail_positions(self, retail_id: str) -> List[Dict]:
+        """Получение позиций розничной продажи"""
+        if not retail_id:
+            return []
+
+        endpoint = f"entity/retaildemand/{retail_id}/positions"
+        data = self._make_request(endpoint)
+
+        if data and 'rows' in data:
+            return data['rows']
+        return []
+
+    def get_combined_sales_report(self, date_from: str, date_to: str) -> Optional[CombinedSalesReport]:
+        """
+        Объединенный отчет: розничные продажи + заказы покупателей
+        """
+        logger.info(f"📊 Запрос объединенного отчета с {date_from} по {date_to}")
+
+        # Получаем оба отчета
+        retail_report = self.get_retail_sales_report(date_from, date_to)
+        orders_report = self.get_sales_report(date_from, date_to)  # Существующий метод
+
+        if not retail_report or not orders_report:
+            logger.error("❌ Не удалось получить один из отчетов")
+            return None
+
+        # Рассчитываем общие показатели
+        combined_total = retail_report.total_sales + orders_report.total_sales
+        combined_orders = retail_report.total_orders + orders_report.total_orders
+
+        # Рассчитываем доли
+        retail_share = (retail_report.total_sales / combined_total * 100) if combined_total > 0 else 0
+        orders_share = (orders_report.total_sales / combined_total * 100) if combined_total > 0 else 0
+
+        period = f"{date_from} - {date_to}" if date_from != date_to else date_from
+
+        return CombinedSalesReport(
+            period=period,
+            retail=retail_report,
+            orders=orders_report,
+            combined_total=combined_total,
+            combined_orders=combined_orders,
+            retail_share=retail_share,
+            orders_share=orders_share
+        )
+
+
 
 
 def get_period_dates(period_type: str) -> tuple:

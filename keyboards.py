@@ -21,10 +21,11 @@ def get_main_menu(telegram_id: int = None):
             user_data = db.get_user(telegram_id)
 
             if user_data and user_data.get('api_token_encrypted'):
-                # Пользователь зарегистрирован - показываем основное меню
+                # Пользователь зарегистрирован - показываем ОБНОВЛЕННОЕ меню
                 keyboard = [
-                    [KeyboardButton("📊 Отчеты"), KeyboardButton("📈 Аналитика")],
-                    [KeyboardButton("⚙️ Настройки"), KeyboardButton("ℹ️ Помощь")]
+                    [KeyboardButton("📅 Быстрый отчет"), KeyboardButton("📊 Детальные отчеты")],
+                    [KeyboardButton("📈 Аналитика"), KeyboardButton("⚙️ Настройки")],
+                    [KeyboardButton("ℹ️ Помощь")]
                 ]
             else:
                 # Пользователь не зарегистрирован - показываем кнопку регистрации
@@ -35,20 +36,20 @@ def get_main_menu(telegram_id: int = None):
         except Exception as e:
             # В случае ошибки показываем меню по умолчанию
             print(f"Ошибка при получении меню: {e}")
-            keyboard = [
-                [KeyboardButton("📱 Регистрация")],
-                [KeyboardButton("📊 Отчеты"), KeyboardButton("📈 Аналитика")],
-                [KeyboardButton("⚙️ Настройки"), KeyboardButton("ℹ️ Помощь")]
-            ]
+            keyboard = _get_default_keyboard()
     else:
         # Если ID не передан, показываем меню по умолчанию
-        keyboard = [
-            [KeyboardButton("📱 Регистрация")],
-            [KeyboardButton("📊 Отчеты"), KeyboardButton("📈 Аналитика")],
-            [KeyboardButton("⚙️ Настройки"), KeyboardButton("ℹ️ Помощь")]
-        ]
+        keyboard = _get_default_keyboard()
 
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+
+def _get_default_keyboard():
+    """Клавиатура по умолчанию (старая версия)"""
+    return [
+        [KeyboardButton("📱 Регистрация")],
+        [KeyboardButton("📊 Отчеты"), KeyboardButton("📈 Аналитика")],
+        [KeyboardButton("⚙️ Настройки"), KeyboardButton("ℹ️ Помощь")]
+    ]
 
 
 def get_dynamic_main_menu(db, telegram_id: int):
@@ -112,5 +113,25 @@ def get_analytics_keyboard():
         [KeyboardButton("📈 Сегодня vs Вчера"), KeyboardButton("📅 Год назад")],
         [KeyboardButton("📆 Неделя vs Прошлая"), KeyboardButton("📊 Месяц vs Прошлый")],
         [KeyboardButton("🔙 Назад")]
+    ]
+    return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+
+def get_detailed_reports_keyboard():
+    """Клавиатура детализированных отчетов"""
+    keyboard = [
+        [KeyboardButton("🛍 Розничные продажи")],
+        [KeyboardButton("📦 Заказы покупателей")],
+        [KeyboardButton("📊 Объединенный отчет")],
+        [KeyboardButton("🔙 Назад")]
+    ]
+    return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+
+
+def get_reports_menu():
+    """Обновленное меню отчетов"""
+    keyboard = [
+        [KeyboardButton("📅 Быстрый отчет"), KeyboardButton("📊 Детальные отчеты")],
+        [KeyboardButton("📈 Аналитика"), KeyboardButton("⚙️ Настройки")],
+        [KeyboardButton("ℹ️ Помощь")]
     ]
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
