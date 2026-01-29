@@ -3,6 +3,7 @@ import logging
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Any, Tuple
 from dataclasses import dataclass, field
+from concurrent.futures import ThreadPoolExecutor
 import json
 
 logger = logging.getLogger(__name__)
@@ -137,31 +138,31 @@ class QuickReport:
         month_orders_percent = (self.month_data['order_sales'] / month_total * 100) if month_total > 0 else 0
 
         report = f"📊 *БЫСТРЫЙ ОТЧЕТ за {self.month_name}*\n"
-        report += "=" * 40 + "\n\n"
+        report += "=" * 30 + "\n\n"
 
         # Сегодня
-        report += f"*Сегодня ({self.today_date}):*\n"
-        report += f"🛍 Розничные продажи: {self.today_data['retail_sales']:,.2f} ₽ ({today_retail_percent:.1f}%)\n"
-        report += f"   Количество продаж: {self.today_data.get('retail_count', '—')}\n"
+        report += f"*СЕГОДНЯ  ({self.today_date}):*\n\n"
+        report += f"🛍 Розничные продажи: ({self.today_data.get('retail_count', '—')})\n {self.today_data['retail_sales']:,.2f} ₽  ({today_retail_percent:.1f}%)\n\n"
         report += f"📦 Заказы покупателей: {self.today_data['order_sales']:,.2f} ₽ ({today_orders_percent:.1f}%)\n"
         report += f"   Количество заказов: {self.today_data.get('order_count', '—')}\n"
         report += f"💰 *Итого за день:* {today_total:,.2f} ₽\n\n"
 
         # Неделя
-        report += f"*Текущая неделя ({self.week_period}):*\n"
-        report += f"🛍 Розничные продажи: {self.week_data['retail_sales']:,.2f} ₽ ({week_retail_percent:.1f}%)\n"
-        report += f"   Количество продаж: {self.week_data.get('retail_count', '—')}\n"
+        report += f"*НЕДЕЛЯ \n ({self.week_period}):*\n\n"
+        report += f"🛍 Розничные продажи: {self.week_data.get('retail_count', '—')} \n   {self.week_data['retail_sales']:,.2f} ₽ ({week_retail_percent:.1f}%)\n\n"
+
         report += f"📦 Заказы покупателей: {self.week_data['order_sales']:,.2f} ₽ ({week_orders_percent:.1f}%)\n"
-        report += f"   Количество заказов: {self.week_data.get('order_count', '—')}\n"
-        report += f"💰 *Итого за неделю:* {week_total:,.2f} ₽\n\n"
+        report += f"   Количество заказов: {self.week_data.get('order_count', '—')}\n\n"
+        report += f"💰 *Итого за неделю:* {week_total:,.2f} ₽\n\n\n"
+
 
         # Месяц
-        report += f"*Текущий месяц ({self.month_name}):*\n"
-        report += f"🛍 Розничные продажи: {self.month_data['retail_sales']:,.2f} ₽ ({month_retail_percent:.1f}%)\n"
-        report += f"   Количество продаж: {self.month_data.get('retail_count', '—')}\n"
-        report += f"📦 Заказы покупателей: {self.month_data['order_sales']:,.2f} ₽ ({month_orders_percent:.1f}%)\n"
-        report += f"   Количество заказов: {self.month_data.get('order_count', '—')}\n"
-        report += f"💰 *Итого за месяц:* {month_total:,.2f} ₽\n\n"
+        report += f"*МЕСЯЦ ({self.month_name}):*\n\n"
+        report += f"🛍 Розничные продажи: ({self.month_data.get('retail_count', '—')})\n Итого:{self.month_data['retail_sales']:,.2f} ₽ ({month_retail_percent:.1f}%)\n\n"
+        report += f"📦 Заказы покупателей: ({self.month_data.get('order_count', '—')})\n {self.month_data['order_sales']:,.2f} ₽ ({month_orders_percent:.1f}%)\n"
+        report += f"💰 *ИТОГО за месяц:*\n **{month_total:,.2f}** ₽\n\n"
+
+        report += "Отличные показатели, так держать!"
 
         return report
 
@@ -227,22 +228,19 @@ class MoyskladAPI:
 
     def get_sales_report(self, date_from: str, date_to: str) -> Optional[MoyskladReport]:
         """
-        Получение отчета о продажах за период
-
-        Args:
-            date_from: Начальная дата в формате 'YYYY-MM-DD'
-            date_to: Конечная дата в формате 'YYYY-MM-DD'
+        Оптимизированная версия - загружаем позиции одним запросом
         """
-        logger.info(f"📊 Запрос отчета продаж с {date_from} по {date_to}")
+        logger.info(f"📊 Запрос отчета продаж с {date_from} по {date_to} (оптимизированная версия)")
 
-        # Параметры запроса - используем фильтр по created
+        # ✅ ИСПРАВЛЕНО: Добавляем expand=positions чтобы получить позиции сразу
         params = {
             "filter": f"created>={date_from} 00:00:00;created<={date_to} 23:59:59",
             "limit": 1000,
-            "order": "created,desc"  # Сначала новые заказы
+            "order": "created,desc",
+            "expand": "positions"  # ✅ ЗАГРУЖАЕМ ПОЗИЦИИ ВМЕСТЕ С ЗАКАЗАМИ
         }
 
-        logger.info(f"📋 Параметры запроса: {params}")
+        logger.info(f"📋 Оптимизированные параметры запроса: expand=positions")
 
         # Получаем заказы покупателей
         endpoint = "entity/customerorder"
@@ -250,16 +248,12 @@ class MoyskladAPI:
 
         data = self._make_request(endpoint, params)
 
-        if not data:
+        if not data or 'rows' not in data:
             logger.error("❌ Нет данных от API")
             return None
 
-        if 'rows' not in data:
-            logger.error(f"❌ Нет ключа 'rows' в ответе. Ответ: {json.dumps(data, ensure_ascii=False)[:200]}")
-            return None
-
         orders = data['rows']
-        logger.info(f"✅ Получено заказов: {len(orders)}")
+        logger.info(f"✅ Получено заказов с позициями: {len(orders)}")
 
         # Дополнительная фильтрация на нашей стороне (на всякий случай)
         filtered_orders = []
@@ -311,7 +305,7 @@ class MoyskladAPI:
 
             # Получаем позиции заказа
             if order_id:
-                positions = self.get_order_positions(order_id)
+                positions = order.get('positions', {}).get('rows', [])
                 if positions:
                     for pos in positions:
                         quantity = pos.get('quantity', 0)
@@ -347,17 +341,6 @@ class MoyskladAPI:
             details=details[:10]  # Ограничиваем детали
         )
 
-    def get_order_positions(self, order_id: str) -> List[Dict]:
-        """Получение позиций заказа"""
-        if not order_id:
-            return []
-
-        endpoint = f"entity/customerorder/{order_id}/positions"
-        data = self._make_request(endpoint)
-
-        if data and 'rows' in data:
-            return data['rows']
-        return []
 
     def get_detailed_sales_report(self, date_from: str, date_to: str) -> Optional[Dict]:
         """Получение детального отчета о продажах"""
@@ -403,11 +386,11 @@ class MoyskladAPI:
             "filter": f"moment>={date_from} 00:00:00;moment<={date_to} 23:59:59",
             "limit": 1000,
             "order": "moment,desc",
-            "expand": "retailStore,retailShift"  # Получаем информацию о точке и смене
+            "expand": "positions,retailStore,retailShift"  # Получаем информацию о точке и смене
         }
 
         endpoint = "entity/retaildemand"
-        logger.info(f"🌐 Запрос розничных продаж: {endpoint}")
+        logger.info(f"🌐 Оптимизированный запрос: expand=positions,retailStore,retailShift")
 
         data = self._make_request(endpoint, params)
 
@@ -418,7 +401,7 @@ class MoyskladAPI:
         retail_demands = data['rows']
         logger.info(f"✅ Получено розничных продаж: {len(retail_demands)}")
 
-        # Также получаем возвраты (retailsalesreturn)
+        # Получаем возвраты
         returns_params = {
             "filter": f"moment>={date_from} 00:00:00;moment<={date_to} 23:59:59",
             "limit": 1000
@@ -433,6 +416,7 @@ class MoyskladAPI:
         returns_sum = 0
         retail_points = {}
         cashiers = {}
+        products_count = 0
         details = []
 
         # Обрабатываем розничные продажи
@@ -440,7 +424,13 @@ class MoyskladAPI:
             demand_sum = demand.get('sum', 0) / 100
             total_sales += demand_sum
 
-            # Информация о торговой точке
+            # ✅ ИСПРАВЛЕНО: Позиции уже загружены
+            positions = demand.get('positions', {}).get('rows', [])
+            for pos in positions:
+                quantity = pos.get('quantity', 0)
+                products_count += quantity
+
+            # Информация о торговой точке (уже загружена)
             store = demand.get('retailStore', {})
             store_name = store.get('name', 'Не указана')
             retail_points[store_name] = retail_points.get(store_name, 0) + demand_sum
@@ -458,42 +448,39 @@ class MoyskladAPI:
 
             cashiers[demand.get('id')] = cashier_info
 
-            # Добавляем детали
             details.append({
                 'id': demand.get('id'),
                 'name': demand.get('name', 'Без номера'),
                 'sum': demand_sum,
                 'date': demand.get('moment', '')[:10],
                 'store': store_name,
-                'type': 'Розничная продажа'
+                'type': 'Розничная продажа',
+                'positions_count': len(positions)
             })
 
-        # Обрабатываем возвраты
-        for return_item in returns:
-            return_sum = abs(return_item.get('sum', 0) / 100)  # Сумма возврата отрицательная
-            returns_sum += return_sum
+            # Обрабатываем возвраты
+            for return_item in returns:
+                return_sum = abs(return_item.get('sum', 0) / 100)
+                returns_sum += return_sum
 
-            details.append({
-                'id': return_item.get('id'),
-                'name': return_item.get('name', 'Без номера'),
-                'sum': -return_sum,  # Отрицательная сумма
-                'date': return_item.get('moment', '')[:10],
-                'store': return_item.get('retailStore', {}).get('name', 'Не указана'),
-                'type': 'Возврат'
-            })
+                details.append({
+                    'id': return_item.get('id'),
+                    'name': return_item.get('name', 'Без номера'),
+                    'sum': -return_sum,
+                    'date': return_item.get('moment', '')[:10],
+                    'store': return_item.get('retailStore', {}).get('name', 'Не указана'),
+                    'type': 'Возврат'
+                })
 
-        # Подсчет товаров (упрощенно)
-        products_count = 0
-        for demand in retail_demands:
-            positions = self.get_retail_positions(demand.get('id'))
-            if positions:
-                for pos in positions:
-                    products_count += pos.get('quantity', 0)
+            total_orders = len(retail_demands)
+            average_order = total_sales / total_orders if total_orders > 0 else 0
+
+
 
         total_orders = len(retail_demands)
         average_order = total_sales / total_orders if total_orders > 0 else 0
 
-        # Форматируем торговые точки для отчета
+        # Форматируем торговые точки
         retail_points_list = []
         for store_name, store_sales in retail_points.items():
             retail_points_list.append({
@@ -502,10 +489,7 @@ class MoyskladAPI:
                 'share': (store_sales / total_sales * 100) if total_sales > 0 else 0
             })
 
-        # Сортируем точки по объему продаж
         retail_points_list.sort(key=lambda x: x['sales'], reverse=True)
-
-        logger.info(f"📈 Розничные продажи: сумма={total_sales:.2f} ₽, чеков={total_orders}")
 
         period = f"{date_from} - {date_to}" if date_from != date_to else date_from
 
@@ -515,24 +499,13 @@ class MoyskladAPI:
             total_orders=total_orders,
             average_order=average_order,
             products_count=products_count,
-            details=details[:15],  # Ограничиваем детали
-            retail_points=retail_points_list[:10],  # Топ-10 точек
-            cashiers=list(cashiers.values())[:10],  # Топ-10 кассиров
+            details=details[:15],
+            retail_points=retail_points_list[:10],
+            cashiers=list(cashiers.values())[:10],
             returns_count=len(returns),
             returns_sum=returns_sum
         )
 
-    def get_retail_positions(self, retail_id: str) -> List[Dict]:
-        """Получение позиций розничной продажи"""
-        if not retail_id:
-            return []
-
-        endpoint = f"entity/retaildemand/{retail_id}/positions"
-        data = self._make_request(endpoint)
-
-        if data and 'rows' in data:
-            return data['rows']
-        return []
 
     def get_combined_sales_report(self, date_from: str, date_to: str) -> Optional[CombinedSalesReport]:
         """
@@ -570,12 +543,9 @@ class MoyskladAPI:
 
     def get_quick_report(self) -> Optional[QuickReport]:
         """
-        Получение быстрого отчета за три периода:
-        1. Сегодня
-        2. Текущая неделя
-        3. Текущий месяц
+        Оптимизированная версия быстрого отчета с параллельными запросами
         """
-        logger.info("🚀 Формирование быстрого отчета...")
+        logger.info("🚀 Формирование быстрого отчета (оптимизированная версия)...")
 
         # Получаем даты для всех периодов
         today_from, today_to = get_period_dates('today')
@@ -583,25 +553,33 @@ class MoyskladAPI:
         month_from, month_to = get_period_dates('month')
 
         # Форматируем даты для отображения
+        from datetime import datetime
         today_date = datetime.now().strftime('%d.%m.%Y')
         week_period = f"{week_from} - {week_to}"
         month_name = datetime.now().strftime('%B %Y')
 
         try:
-            # Получаем данные для каждого периода
-            # Сегодня
-            today_retail = self.get_retail_sales_report(today_from, today_to)
-            today_orders = self.get_sales_report(today_from, today_to)
+            # ✅ ОПТИМИЗАЦИЯ: Параллельные запросы для всех периодов
+            with ThreadPoolExecutor(max_workers=3) as executor:
+                # Запускаем все запросы параллельно
+                future_today_retail = executor.submit(self.get_retail_sales_report, today_from, today_to)
+                future_today_orders = executor.submit(self.get_sales_report, today_from, today_to)
 
-            # Неделя
-            week_retail = self.get_retail_sales_report(week_from, week_to)
-            week_orders = self.get_sales_report(week_from, week_to)
+                future_week_retail = executor.submit(self.get_retail_sales_report, week_from, week_to)
+                future_week_orders = executor.submit(self.get_sales_report, week_from, week_to)
 
-            # Месяц
-            month_retail = self.get_retail_sales_report(month_from, month_to)
-            month_orders = self.get_sales_report(month_from, month_to)
+                future_month_retail = executor.submit(self.get_retail_sales_report, month_from, month_to)
+                future_month_orders = executor.submit(self.get_sales_report, month_from, month_to)
 
-            # Формируем структуру отчета с ВСЕМИ данными
+                # Получаем результаты
+                today_retail = future_today_retail.result()
+                today_orders = future_today_orders.result()
+                week_retail = future_week_retail.result()
+                week_orders = future_week_orders.result()
+                month_retail = future_month_retail.result()
+                month_orders = future_month_orders.result()
+
+            # Формируем отчет
             quick_report = QuickReport(
                 today_date=today_date,
                 week_period=week_period,
@@ -626,11 +604,11 @@ class MoyskladAPI:
                 }
             )
 
-            logger.info(f"✅ Быстрый отчет сформирован")
+            logger.info(f"✅ Быстрый отчет сформирован (параллельные запросы)")
             return quick_report
 
         except Exception as e:
-            logger.error(f"❌ Ошибка формирования быстрого отчета: {e}")
+            logger.error(f"❌ Ошибка формирования быстрого отчета: {e}", exc_info=True)
             return None
 
 
