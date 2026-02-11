@@ -150,6 +150,90 @@ class Database:
                 WHERE telegram_id = ?
             ''', (datetime.now(), telegram_id))
 
+    def get_users_with_notifications(self) -> list:
+        """
+        Получить список пользователей с включенными уведомлениями
+        
+        Returns:
+            List[tuple]: Список кортежей (telegram_id, encrypted_api_token)
+        """
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute('''
+                SELECT u.telegram_id, u.api_token_encrypted
+                FROM users u
+                JOIN user_settings s ON u.id = s.user_id
+                WHERE s.notification_enabled = 1 
+                  AND u.api_token_encrypted IS NOT NULL
+                  AND u.is_active = 1
+            ''')
+            
+            results = cursor.fetchall()
+            # Преобразуем Row объекты в кортежи
+            return [(row['telegram_id'], row['api_token_encrypted']) for row in results]
+
+    def update_notification_setting(self, telegram_id: int, enabled: bool) -> bool:
+        """
+        Обновить настройку уведомлений для пользователя
+        
+        Args:
+            telegram_id: Telegram ID пользователя
+            enabled: True для включения, False для выключения
+            
+        Returns:
+            bool: True если обновление успешно
+        """
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            
+            # Получаем ID пользователя
+            cursor.execute("SELECT id FROM users WHERE telegram_id = ?", (telegram_id,))
+            user = cursor.fetchone()
+            
+            if not user:
+                logger.warning(f"Пользователь {telegram_id} не найден")
+                return False
+            
+            user_id = user['id']
+            
+            # Обновляем настройку
+            cursor.execute('''
+                UPDATE user_settings 
+                SET notification_enabled = ?, updated_at = ?
+                WHERE user_id = ?
+            ''', (1 if enabled else 0, datetime.now(), user_id))
+            
+            updated = cursor.rowcount > 0
+            
+            if updated:
+                logger.info(f"Уведомления {'включены' if enabled else 'выключены'} для пользователя {telegram_id}")
+            
+            return updated
+
+    def get_notification_status(self, telegram_id: int) -> Optional[bool]:
+        """
+        Получить статус уведомлений для пользователя
+        
+        Args:
+            telegram_id: Telegram ID пользователя
+            
+        Returns:
+            bool: True если уведомления включены, False если выключены, None если пользователь не найден
+        """
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute('''
+                SELECT s.notification_enabled
+                FROM users u
+                JOIN user_settings s ON u.id = s.user_id
+                WHERE u.telegram_id = ?
+            ''', (telegram_id,))
+            
+            result = cursor.fetchone()
+            if result:
+                return bool(result['notification_enabled'])
+            return None
+
 
 # Создаем синглтон экземпляр БД
 def init_database(db_path: str) -> Database:

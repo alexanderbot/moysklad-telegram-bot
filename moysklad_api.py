@@ -178,6 +178,8 @@ class MoyskladAPI:
             "Accept-Encoding": "gzip",
             "Content-Type": "application/json"
         }
+        # Кэш для наименований ассортимента, чтобы не дергать API по одному и тому же href
+        self._assortment_cache: Dict[str, str] = {}
 
     def _make_request(self, endpoint: str, params: Dict = None) -> Optional[Dict]:
         """Выполнение запроса к API"""
@@ -377,7 +379,6 @@ class MoyskladAPI:
     def get_retail_sales_report(self, date_from: str, date_to: str) -> Optional[RetailSalesReport]:
         """
         Получение отчета по розничным продажам за период
-        Эндпоинт: entity/retaildemand
         """
         logger.info(f"📊 Запрос отчета по розничным продажам с {date_from} по {date_to}")
 
@@ -386,7 +387,7 @@ class MoyskladAPI:
             "filter": f"moment>={date_from} 00:00:00;moment<={date_to} 23:59:59",
             "limit": 1000,
             "order": "moment,desc",
-            "expand": "positions,retailStore,retailShift"  # Получаем информацию о точке и смене
+            "expand": "positions,retailStore,retailShift"
         }
 
         endpoint = "entity/retaildemand"
@@ -401,15 +402,18 @@ class MoyskladAPI:
         retail_demands = data['rows']
         logger.info(f"✅ Получено розничных продаж: {len(retail_demands)}")
 
-        # Получаем возвраты
+        # Получаем возвраты ОТДЕЛЬНЫМ запросом
         returns_params = {
             "filter": f"moment>={date_from} 00:00:00;moment<={date_to} 23:59:59",
-            "limit": 1000
+            "limit": 1000,
+            "expand": "positions,retailStore"
         }
 
         returns_data = self._make_request("entity/retailsalesreturn", returns_params)
         returns = returns_data.get('rows', []) if returns_data else []
         logger.info(f"🔄 Найдено возвратов: {len(returns)}")
+
+        # ===== ИСПРАВЛЕНИЕ НАЧИНАЕТСЯ ЗДЕСЬ =====
 
         # Обработка данных
         total_sales = 0
@@ -419,35 +423,37 @@ class MoyskladAPI:
         products_count = 0
         details = []
 
-        # Обрабатываем розничные продажи
+        # 1. СНАЧАЛА обрабатываем ВСЕ розничные продажи
+        logger.info(f"🔍 Обработка {len(retail_demands)} розничных продаж...")
         for demand in retail_demands:
-            demand_sum = demand.get('sum', 0) / 100
+            demand_sum = demand.get('sum', 0) / 100  # Переводим из копеек в рубли
             total_sales += demand_sum
 
-            # ✅ ИСПРАВЛЕНО: Позиции уже загружены
+            # Подсчет товаров из позиций (если они загружены)
             positions = demand.get('positions', {}).get('rows', [])
             for pos in positions:
                 quantity = pos.get('quantity', 0)
                 products_count += quantity
 
-            # Информация о торговой точке (уже загружена)
+            # Информация о торговой точке
             store = demand.get('retailStore', {})
             store_name = store.get('name', 'Не указана')
             retail_points[store_name] = retail_points.get(store_name, 0) + demand_sum
 
             # Информация о кассире/смене
-            shift = demand.get('retailShift', {})
             cashier_info = {
                 'name': demand.get('name', 'Без номера'),
                 'store': store_name,
                 'sum': demand_sum
             }
 
+            shift = demand.get('retailShift', {})
             if shift:
                 cashier_info['shift'] = shift.get('name', 'Без смены')
 
             cashiers[demand.get('id')] = cashier_info
 
+            # Добавляем детали продажи
             details.append({
                 'id': demand.get('id'),
                 'name': demand.get('name', 'Без номера'),
@@ -458,48 +464,83 @@ class MoyskladAPI:
                 'positions_count': len(positions)
             })
 
-            # Обрабатываем возвраты
-            for return_item in returns:
-                return_sum = abs(return_item.get('sum', 0) / 100)
-                returns_sum += return_sum
+        # 2. ПОТОМ отдельно обрабатываем ВСЕ возвраты
+        logger.info(f"🔍 Обработка {len(returns)} возвратов...")
+        for return_item in returns:
+            # Сумма возврата обычно отрицательная, берем по модулю
+            return_sum = abs(return_item.get('sum', 0) / 100)
+            returns_sum += return_sum
 
-                details.append({
-                    'id': return_item.get('id'),
-                    'name': return_item.get('name', 'Без номера'),
-                    'sum': -return_sum,
-                    'date': return_item.get('moment', '')[:10],
-                    'store': return_item.get('retailStore', {}).get('name', 'Не указана'),
-                    'type': 'Возврат'
-                })
+            # Получаем информацию о магазине возврата
+            return_store = return_item.get('retailStore', {})
+            return_store_name = return_store.get('name', 'Не указана')
 
-            total_orders = len(retail_demands)
-            average_order = total_sales / total_orders if total_orders > 0 else 0
+            # Подсчет возвращенных товаров
+            return_positions = return_item.get('positions', {}).get('rows', [])
+            return_products_count = 0
+            for pos in return_positions:
+                quantity = pos.get('quantity', 0)
+                return_products_count += quantity
 
+            # Вычитаем возвращенные товары из общего количества
+            products_count -= return_products_count
 
+            # Обновляем статистику по торговой точке (вычитаем возвраты)
+            if return_store_name in retail_points:
+                retail_points[return_store_name] -= return_sum
+            else:
+                retail_points[return_store_name] = -return_sum
 
-        total_orders = len(retail_demands)
-        average_order = total_sales / total_orders if total_orders > 0 else 0
+            # Добавляем детали возврата
+            details.append({
+                'id': return_item.get('id'),
+                'name': return_item.get('name', 'Без номера'),
+                'sum': -return_sum,  # Отрицательная сумма
+                'date': return_item.get('moment', '')[:10],
+                'store': return_store_name,
+                'type': 'Возврат',
+                'positions_count': len(return_positions)
+            })
+
+        # ===== ИСПРАВЛЕНИЕ ЗАКОНЧЕНО =====
+
+        # Рассчитываем итоговые показатели
+        total_orders = len(retail_demands) + len(returns)  # Все операции: продажи + возвраты
+        net_sales = total_sales - returns_sum  # Чистые продажи
+
+        if len(retail_demands) > 0:
+            average_order = total_sales / len(retail_demands)  # Средний чек только по продажам
+        else:
+            average_order = 0
 
         # Форматируем торговые точки
         retail_points_list = []
         for store_name, store_sales in retail_points.items():
-            retail_points_list.append({
-                'name': store_name,
-                'sales': store_sales,
-                'share': (store_sales / total_sales * 100) if total_sales > 0 else 0
-            })
+            # Игнорируем точки с нулевыми или отрицательными продажами (после вычета возвратов)
+            if store_sales > 0:
+                retail_points_list.append({
+                    'name': store_name,
+                    'sales': store_sales,
+                    'share': (store_sales / net_sales * 100) if net_sales > 0 else 0
+                })
 
         retail_points_list.sort(key=lambda x: x['sales'], reverse=True)
 
+        # Формируем период
         period = f"{date_from} - {date_to}" if date_from != date_to else date_from
+
+        logger.info(f"📈 Итоги: Продаж={len(retail_demands)}, "
+                    f"Возвратов={len(returns)}, "
+                    f"Чистые продажи={net_sales:.2f} руб, "
+                    f"Товаров={int(products_count)}")
 
         return RetailSalesReport(
             period=period,
-            total_sales=total_sales,
-            total_orders=total_orders,
+            total_sales=total_sales,  # Общая сумма продаж (без учета возвратов)
+            total_orders=len(retail_demands),  # Только количество продаж
             average_order=average_order,
-            products_count=products_count,
-            details=details[:15],
+            products_count=int(max(products_count, 0)),  # Не может быть отрицательным
+            details=details[:20],  # Ограничиваем детали
             retail_points=retail_points_list[:10],
             cashiers=list(cashiers.values())[:10],
             returns_count=len(returns),
@@ -540,6 +581,149 @@ class MoyskladAPI:
             retail_share=retail_share,
             orders_share=orders_share
         )
+
+    def get_top_products(self, date_from: str, date_to: str, limit: int = 20) -> Optional[List[Dict[str, Any]]]:
+        """
+        Топ товаров по количеству и сумме продаж за период
+        (заказы покупателей + розничные продажи).
+        """
+        logger.info(f"📊 Запрос топ-{limit} товаров с {date_from} по {date_to}")
+
+        products: Dict[str, Dict[str, float]] = {}
+
+        # ===== 1. Заказы покупателей =====
+        orders_params = {
+            "filter": f"created>={date_from} 00:00:00;created<={date_to} 23:59:59",
+            "limit": 1000,
+            "order": "created,desc"
+        }
+        orders_data = self._make_request("entity/customerorder", orders_params)
+
+        if orders_data and 'rows' in orders_data:
+            orders = orders_data['rows']
+            logger.info(f"📦 Заказы покупателей для топа: {len(orders)}")
+
+            for order in orders:
+                order_id = order.get('id')
+                if not order_id:
+                    continue
+
+                # Загружаем позиции заказа отдельным запросом
+                pos_data = self._make_request(f"entity/customerorder/{order_id}/positions", {"limit": 1000})
+                positions = pos_data.get('rows', []) if pos_data and 'rows' in pos_data else []
+
+                for pos in positions:
+                    assortment = pos.get('assortment', {}) or {}
+                    name = self._get_assortment_name(assortment)
+                    quantity = float(pos.get('quantity', 0) or 0)
+                    price = (pos.get('price') or 0) / 100  # цена в рублях
+                    amount = quantity * price
+
+                    item = products.setdefault(name, {"quantity": 0.0, "amount": 0.0})
+                    item["quantity"] += quantity
+                    item["amount"] += amount
+
+            logger.info(f"📦 Уникальных товаров из заказов: {len(products)}")
+        else:
+            logger.info("ℹ️ Нет заказов покупателей для топа товаров")
+
+        # ===== 2. Розничные продажи =====
+        retail_params = {
+            "filter": f"moment>={date_from} 00:00:00;moment<={date_to} 23:59:59",
+            "limit": 1000,
+            "order": "moment,desc"
+        }
+        retail_data = self._make_request("entity/retaildemand", retail_params)
+
+        if retail_data and 'rows' in retail_data:
+            retail_demands = retail_data['rows']
+            logger.info(f"🛍 Розничные продажи для топа: {len(retail_demands)}")
+
+            for demand in retail_demands:
+                demand_id = demand.get('id')
+                if not demand_id:
+                    continue
+
+                # Загружаем позиции розничной продажи отдельным запросом
+                pos_data = self._make_request(f"entity/retaildemand/{demand_id}/positions", {"limit": 1000})
+                positions = pos_data.get('rows', []) if pos_data and 'rows' in pos_data else []
+
+                for pos in positions:
+                    assortment = pos.get('assortment', {}) or {}
+                    name = self._get_assortment_name(assortment)
+                    quantity = float(pos.get('quantity', 0) or 0)
+                    price = (pos.get('price') or 0) / 100  # цена в рублях
+                    amount = quantity * price
+
+                    item = products.setdefault(name, {"quantity": 0.0, "amount": 0.0})
+                    item["quantity"] += quantity
+                    item["amount"] += amount
+
+            logger.info(f"🛍 Уникальных товаров с учётом розницы: {len(products)}")
+        else:
+            logger.info("ℹ️ Нет розничных продаж для топа товаров")
+
+        if not products:
+            logger.warning("⚠️ Нет проданных товаров за период для формирования топа")
+            return None
+
+        logger.info(f"📦 Найдено уникальных товаров (все каналы): {len(products)}")
+
+        # Сортируем по сумме продаж, затем по количеству
+        sorted_items = sorted(
+            products.items(),
+            key=lambda kv: (kv[1]["amount"], kv[1]["quantity"]),
+            reverse=True
+        )
+
+        top_items = [
+            {
+                "name": name,
+                "quantity": round(stat["quantity"], 2),
+                "amount": round(stat["amount"], 2),
+            }
+            for name, stat in sorted_items[:limit]
+            if stat["quantity"] > 0
+        ]
+
+        logger.info(f"✅ Сформирован топ-{len(top_items)} товаров за период")
+        return top_items
+
+    def _get_assortment_name(self, assortment: Dict[str, Any]) -> str:
+        """
+        Получение названия товара/услуги по объекту assortment.
+        Если в позиции нет поля name, делаем дополнительный запрос по meta.href и кэшируем результат.
+        """
+        # Если имя уже есть в объекте – сразу возвращаем
+        name = assortment.get("name")
+        if name:
+            return name
+
+        meta = assortment.get("meta") or {}
+        href = meta.get("href")
+
+        if not href:
+            return "Без названия"
+
+        # Проверяем кэш по href
+        cached = self._assortment_cache.get(href)
+        if cached:
+            return cached
+
+        try:
+            logger.debug(f"🔍 Запрос наименование ассортимента по href: {href}")
+            resp = requests.get(href, headers=self.headers, timeout=30)
+            if resp.status_code == 200:
+                data = resp.json()
+                name = data.get("name") or "Без названия"
+                self._assortment_cache[href] = name
+                return name
+            else:
+                logger.warning(f"⚠️ Не удалось получить наименование ассортимента ({resp.status_code}) по href: {href}")
+        except Exception as e:
+            logger.error(f"❌ Ошибка при получении наименования ассортимента: {e}")
+
+        return "Без названия"
 
     def get_quick_report(self) -> Optional[QuickReport]:
         """
@@ -660,6 +844,11 @@ def get_period_dates(period_type: str) -> tuple:
         first_day_of_last_month = last_day_of_last_month.replace(day=1)
         date_from = first_day_of_last_month.strftime('%Y-%m-%d')
         date_to = last_day_of_last_month.strftime('%Y-%m-%d')
+
+    elif period_type == 'year_ago':
+        # Тот же день год назад (приближенно: минус 365 дней)
+        year_ago = today - timedelta(days=365)
+        date_from = date_to = year_ago.strftime('%Y-%m-%d')
 
     else:
         # По умолчанию сегодня

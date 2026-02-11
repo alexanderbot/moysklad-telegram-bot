@@ -4,67 +4,17 @@ from telegram import (
     InlineKeyboardMarkup,
     InlineKeyboardButton
 )
-from database import init_database
-from config import config
-from security import security
 
 
-def get_main_menu(telegram_id: int = None):
-    """
-    Главное меню бота
-    Если передан telegram_id - проверяем регистрацию пользователя
-    """
-    # Если передан ID пользователя, проверяем его статус
-    if telegram_id:
-        try:
-            db = init_database(config.DB_PATH)
-            user_data = db.get_user(telegram_id)
 
-            if user_data and user_data.get('api_token_encrypted'):
-                # Пользователь зарегистрирован - показываем ОБНОВЛЕННОЕ меню
-                keyboard = [
-                    [KeyboardButton("📊 Быстрый отчет"), KeyboardButton("📊 Детальные отчеты")],
-                    [KeyboardButton("📈 Аналитика")]
-                ]
-            else:
-                # Пользователь не зарегистрирован - показываем кнопку регистрации
-                keyboard = [
-                    [KeyboardButton("📱 Регистрация")],
-                    [KeyboardButton("ℹ️ Помощь")]
-                ]
-        except Exception as e:
-            # В случае ошибки показываем меню по умолчанию
-            print(f"Ошибка при получении меню: {e}")
-            keyboard = _get_default_keyboard()
-    else:
-        # Если ID не передан, показываем меню по умолчанию
-        keyboard = _get_default_keyboard()
-
-    return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
-
-def _get_default_keyboard():
-    """Клавиатура по умолчанию (старая версия)"""
-    return [
-        [KeyboardButton("📱 Регистрация")],
-        [KeyboardButton("📊 Отчеты"), KeyboardButton("📈 Аналитика")],
-        [KeyboardButton("⚙️ Настройки"), KeyboardButton("ℹ️ Помощь")]
-    ]
-
-
-def get_dynamic_main_menu(db, telegram_id: int):
-    """
-    Альтернативная версия с передачей объекта базы данных
-    """
-    user_data = db.get_user(telegram_id)
-
-    if user_data and user_data.get('api_token_encrypted'):
-        # Пользователь зарегистрирован
+def get_main_menu(is_registered: bool = False):
+    """Главное меню бота"""
+    if is_registered:
         keyboard = [
-            [KeyboardButton("📊 Отчеты"), KeyboardButton("📈 Аналитика")],
-            [KeyboardButton("⚙️ Настройки"), KeyboardButton("ℹ️ Помощь")]
+            [KeyboardButton("📊 Быстрый отчет"), KeyboardButton("📊 Детальные отчеты")],
+            [KeyboardButton("📈 Аналитика"), KeyboardButton("⚙️ Настройки")]
         ]
     else:
-        # Пользователь не зарегистрирован
         keyboard = [
             [KeyboardButton("📱 Регистрация")],
             [KeyboardButton("ℹ️ Помощь")]
@@ -93,7 +43,7 @@ def get_settings_keyboard():
     """Клавиатура настроек"""
     keyboard = [
         [KeyboardButton("🔑 Установить API-токен")],
-        [KeyboardButton("🔄 Обновить токен"), KeyboardButton("📊 Настройки отчетов")],
+        [KeyboardButton("🔄 Обновить токен")],
         [KeyboardButton("🔙 Назад")]
     ]
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
@@ -108,29 +58,55 @@ def get_back_keyboard():
 def get_analytics_keyboard():
     """Клавиатура для аналитики"""
     keyboard = [
-        [KeyboardButton("📊 Сравнить периоды")],
         [KeyboardButton("📈 Сегодня vs Вчера"), KeyboardButton("📅 Год назад")],
         [KeyboardButton("📆 Неделя vs Прошлая"), KeyboardButton("📊 Месяц vs Прошлый")],
         [KeyboardButton("🔙 Назад")]
     ]
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
 
+# Обновим функцию детализированных отчетов
 def get_detailed_reports_keyboard():
     """Клавиатура детализированных отчетов"""
     keyboard = [
         [KeyboardButton("🛍 Розничные продажи")],
         [KeyboardButton("📦 Заказы покупателей")],
         [KeyboardButton("📊 Объединенный отчет")],
+        [KeyboardButton("🧾 Топ-20 товаров")],
         [KeyboardButton("🔙 Назад")]
     ]
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
 
 
-def get_reports_menu():
-    """Обновленное меню отчетов"""
+
+def get_detailed_period_keyboard(report_type: str = None):
+    """Клавиатура выбора периода для детальных отчетов"""
     keyboard = [
-        [KeyboardButton("📅 Быстрый отчет"), KeyboardButton("📊 Детальные отчеты")],
-        [KeyboardButton("📈 Аналитика"), KeyboardButton("⚙️ Настройки")],
-        [KeyboardButton("ℹ️ Помощь")]
+        [KeyboardButton("📅 Сегодня"), KeyboardButton("📆 Неделя")],
+        [KeyboardButton("📈 Месяц"), KeyboardButton("🗓 Произвольный период")],
+        [KeyboardButton("🔙 Назад к отчетам")]
     ]
+    return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+
+
+def get_notifications_keyboard(enabled: bool) -> ReplyKeyboardMarkup:
+    """
+    Клавиатура управления уведомлениями
+    
+    Args:
+        enabled: True если уведомления включены, False если выключены
+        
+    Returns:
+        ReplyKeyboardMarkup с кнопками управления
+    """
+    if enabled:
+        keyboard = [
+            [KeyboardButton("🔕 Выключить уведомления")],
+            [KeyboardButton("◀️ Назад в меню")]
+        ]
+    else:
+        keyboard = [
+            [KeyboardButton("🔔 Включить уведомления")],
+            [KeyboardButton("◀️ Назад в меню")]
+        ]
+    
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)

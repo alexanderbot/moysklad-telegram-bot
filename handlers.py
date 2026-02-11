@@ -3,11 +3,8 @@ from telegram import Update, ReplyKeyboardRemove
 from telegram.ext import ContextTypes, ConversationHandler, MessageHandler, filters, CommandHandler
 from telegram.constants import ParseMode
 
-from moysklad_api import MoyskladAPI, get_period_dates, AnalyticsCalculator, MoyskladReport
-from security import security
-import asyncio
-from datetime import datetime, timedelta
-from moysklad_api import RetailSalesReport, CombinedSalesReport
+from moysklad_api import MoyskladAPI, get_period_dates, AnalyticsCalculator
+from datetime import datetime
 from database import Database
 from security import security
 from keyboards import (
@@ -17,7 +14,9 @@ from keyboards import (
     get_settings_keyboard,
     get_back_keyboard,
     get_analytics_keyboard,
-    get_detailed_reports_keyboard
+    get_detailed_reports_keyboard,
+    get_detailed_period_keyboard,
+    get_notifications_keyboard
 )
 
 logger = logging.getLogger(__name__)
@@ -40,20 +39,70 @@ class AuthHandlers:
         # Проверяем, зарегистрирован ли уже пользователь
         user_data = self.db.get_user(user.id)
 
-        if user_data and user_data.get('phone_number') and user_data.get('api_token_encrypted'):
+        # Проверяем полную регистрацию (телефон + токен)
+        is_fully_registered = user_data and user_data.get('phone_number') and user_data.get('api_token_encrypted')
+
+        if is_fully_registered:
+            logger.info(f"Пользователь {user.id} уже зарегистрирован")
+
+            # Формируем информацию о пользователе
+            phone = user_data.get('phone_number', 'Не указан')
+            registered_date = user_data.get('created_at', 'Неизвестно')
+
             await update.message.reply_text(
-                "✅ Вы уже зарегистрированы!\n"
+                f"✅ *Вы уже зарегистрированы!*\n\n"
+                f"📱 Телефон: `{phone}`\n"
+                f"📅 Дата регистрации: `{registered_date}`\n\n"
                 "Используйте меню для работы с ботом.",
-                reply_markup=get_main_menu(user.id)  # Используем динамическое меню
+                reply_markup=get_main_menu(True),  # ✅ Исправлено: передаем True для зарегистрированных
+                parse_mode=ParseMode.MARKDOWN
             )
             return ConversationHandler.END
 
-        # Запрашиваем номер телефона
+        # Проверяем, есть ли частичная регистрация (только телефон)
+        has_phone = user_data and user_data.get('phone_number')
+
+        if has_phone and not user_data.get('api_token_encrypted'):
+            # Есть телефон, но нет токена - запрашиваем токен
+            logger.info(f"У пользователя {user.id} есть телефон, но нет токена")
+
+            phone = user_data.get('phone_number', 'Не указан')
+
+            await update.message.reply_text(
+                f"📱 *Продолжение регистрации*\n\n"
+                f"У вас уже указан номер: `{phone}`\n\n"
+                "📋 Теперь введите ваш *API-токен МойСклад*:\n\n"
+                "1. Зайдите в МойСклад → Настройки → Токен \n"
+                "2. Создайте новый токен \n"
+                "3. Вставьте его в чат\n\n"
+                "⚠️ *Токен будет зашифрован и безопасно сохранен*",
+                reply_markup=ReplyKeyboardRemove(),
+                parse_mode=ParseMode.MARKDOWN
+            )
+
+            # Сохраняем user_id в контексте
+            context.user_data['user_id'] = user_data['id']
+            context.user_data['phone'] = phone
+
+            return API_TOKEN
+
+        # Полная регистрация - запрашиваем номер телефона
+        logger.info(f"Начало полной регистрации для пользователя {user.id}")
+
         await update.message.reply_text(
-            "🔐 *Регистрация*\n\n"
-            "Для доступа к статистике МойСклад необходимо:\n\n"
-            "1. Предоставить номер телефона\n"
-            "2. Указать API-токен из вашего аккаунта МойСклад\n\n"
+            "🔐 *Регистрация в боте МойСклад*\n\n"
+            "*Для доступа к статистике необходимо:*\n\n"
+            "1. 📱 *Предоставить номер телефона*\n"
+            "   - Нажмите кнопку 'Поделиться номером' ниже\n"
+            "   - Или отправьте номер вручную\n\n"
+            "2. 🔑 *Указать API-токен МойСклад*\n"
+            "   - Зайдите в МойСклад → Настройки → Безопасность\n"
+            "   - Создайте токен с правами на чтение\n"
+            "   - Скопируйте и вставьте в бот\n\n"
+            "*Ваши данные будут защищены:*\n"
+            "• Номер телефона хранится в зашифрованном виде\n"
+            "• API-токен шифруется перед сохранением\n"
+            "• Данные не передаются третьим лицам\n\n"
             "Нажмите кнопку ниже, чтобы поделиться номером:",
             reply_markup=get_phone_keyboard(),
             parse_mode=ParseMode.MARKDOWN
@@ -67,19 +116,17 @@ class AuthHandlers:
 
         if update.message.contact:
             phone_number = update.message.contact.phone_number
+            logger.info(f"Номер телефона получен для пользователя {user.id}: {phone_number}")
 
-            # Сохраняем пользователя с номером телефона
+            # Сохраняем/обновляем пользователя
             user_id = self.db.add_user(user.id, phone_number)
             context.user_data['user_id'] = user_id
             context.user_data['phone'] = phone_number
 
-            logger.info(f"Номер телефона получен для пользователя {user.id}: {phone_number}")
-
-            # Запрашиваем API-токен
             await update.message.reply_text(
-                f"✅ Номер телефона получен: *{phone_number}*\n\n"
+                f"✅ *Номер телефона получен:* `{phone_number}`\n\n"
                 "📋 Теперь введите ваш *API-токен МойСклад*:\n\n"
-                "1. Зайдите в МойСклад → Настройки → Безопасность\n"
+                "1. Зайдите в МойСклад → Настройки → Токены\n"
                 "2. Создайте новый токен или скопируйте существующий\n"
                 "3. Вставьте его в чат\n\n"
                 "⚠️ *Токен будет зашифрован и безопасно сохранен*",
@@ -90,7 +137,7 @@ class AuthHandlers:
             return API_TOKEN
         else:
             await update.message.reply_text(
-                "❌ Пожалуйста, используйте кнопку 'Поделиться номером'",
+                "❌ Пожалуйста, используйте кнопку '📱 Поделиться номером'",
                 reply_markup=get_phone_keyboard()
             )
             return REGISTRATION
@@ -117,36 +164,57 @@ class AuthHandlers:
             if success:
                 logger.info(f"API-токен сохранен для пользователя {user.id}")
 
+                # Обновляем время активности
+                self.db.update_last_active(user.id)
+
+                phone = context.user_data.get('phone', 'не указан')
+
                 await update.message.reply_text(
-                    "🎉 *Регистрация завершена!*\n\n"
-                    "✅ Ваш API-токен успешно сохранен в зашифрованном виде\n"
-                    "✅ Теперь вы можете получать статистику из МойСклад\n\n"
+                    "🎉 *Регистрация успешно завершена!*\n\n"
+                    f"📱 *Телефон:* `{phone}`\n"
+                    "🔐 *Токен:* ✅ Сохранен в зашифрованном виде\n\n"
+                    "✅ Теперь вы можете получать статистику из МойСклад\n"
                     "Используйте меню для работы с отчетами:",
-                    reply_markup=get_main_menu(user.id),  # Динамическое меню для зарегистрированного
+                    reply_markup=get_main_menu(True),  # ✅ Исправлено
                     parse_mode=ParseMode.MARKDOWN
                 )
             else:
                 await update.message.reply_text(
-                    "❌ Ошибка сохранения токена. Попробуйте снова:"
+                    "❌ Ошибка сохранения токена. Попробуйте снова:",
+                    reply_markup=ReplyKeyboardRemove()
                 )
                 return API_TOKEN
 
         except Exception as e:
-            logger.error(f"Ошибка сохранения токена: {e}")
+            logger.error(f"Ошибка сохранения токена для пользователя {user.id}: {e}")
             await update.message.reply_text(
-                "❌ Произошла ошибка при сохранении токена. Попробуйте снова:"
+                "❌ Произошла ошибка при сохранении токена. Попробуйте снова:",
+                reply_markup=ReplyKeyboardRemove()
             )
             return API_TOKEN
+
+        # Очищаем временные данные
+        context.user_data.pop('user_id', None)
+        context.user_data.pop('phone', None)
 
         return ConversationHandler.END
 
     async def cancel_registration(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Отмена регистрации"""
         user = update.effective_user
+
+        # Проверяем статус пользователя
+        user_data = self.db.get_user(user.id)
+        is_registered = user_data and user_data.get('api_token_encrypted')
+
         await update.message.reply_text(
             "❌ Регистрация отменена.",
-            reply_markup=get_main_menu(user.id)  # Динамическое меню
+            reply_markup=get_main_menu(is_registered)  # ✅ Исправлено
         )
+
+        # Очищаем временные данные
+        context.user_data.clear()
+
         return ConversationHandler.END
 
     async def show_settings(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -242,11 +310,13 @@ class MenuHandlers:
     async def show_main_menu(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Показать главное меню"""
         user = update.effective_user
+        user_data = self.db.get_user(user.id)
+        is_registered = user_data and user_data.get('api_token_encrypted')
 
         await update.message.reply_text(
             "📱 *Главное меню*\n\n"
             "Выберите нужный раздел:",
-            reply_markup=get_main_menu(user.id),  # Динамическое меню
+            reply_markup=get_main_menu(is_registered),  # ✅ ПРАВИЛЬНО
             parse_mode=ParseMode.MARKDOWN
         )
 
@@ -254,12 +324,13 @@ class MenuHandlers:
         """Показать меню отчетов"""
         user = update.effective_user
         user_data = self.db.get_user(user.id)
+        is_registered = user_data and user_data.get('api_token_encrypted')
 
-        if not user_data or not user_data.get('api_token_encrypted'):
+        if not is_registered:
             await update.message.reply_text(
                 "❌ Сначала необходимо зарегистрироваться и указать API-токен.\n"
                 "Используйте /start для регистрации.",
-                reply_markup=get_main_menu()
+                reply_markup=get_main_menu(False)  # ✅ ПРАВИЛЬНО
             )
             return
 
@@ -274,12 +345,13 @@ class MenuHandlers:
         """Показать меню аналитики"""
         user = update.effective_user
         user_data = self.db.get_user(user.id)
+        is_registered = user_data and user_data.get('api_token_encrypted')
 
-        if not user_data or not user_data.get('api_token_encrypted'):
+        if not is_registered:
             await update.message.reply_text(
                 "❌ Сначала необходимо зарегистрироваться и указать API-токен.\n"
                 "Используйте /start для регистрации.",
-                reply_markup=get_main_menu()
+                reply_markup=get_main_menu(False)  # ✅ ПРАВИЛЬНО
             )
             return
 
@@ -293,136 +365,15 @@ class MenuHandlers:
     async def handle_back(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Обработка кнопки Назад"""
         user = update.effective_user
+        user_data = self.db.get_user(user.id)
+        is_registered = user_data and user_data.get('api_token_encrypted')
+
         await update.message.reply_text(
             "📱 *Главное меню*\n\n"
             "Выберите нужный раздел:",
-            reply_markup=get_main_menu(user.id),  # Динамическое меню
+            reply_markup=get_main_menu(is_registered),  # ✅ ПРАВИЛЬНО
             parse_mode=ParseMode.MARKDOWN
         )
-
-    async def get_today_report(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Отчет за сегодня"""
-        await self._get_report(update, context, 'today')
-
-    async def get_week_report(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Отчет за неделю"""
-        await self._get_report(update, context, 'week')
-
-    async def get_month_report(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Отчет за месяц"""
-        await self._get_report(update, context, 'month')
-
-    async def get_yesterday_report(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Отчет за вчера"""
-        await self._get_report(update, context, 'yesterday')
-
-    async def _get_report(self, update: Update, context: ContextTypes.DEFAULT_TYPE, period_type: str):
-        """Общий метод для получения отчетов"""
-        user = update.effective_user
-        logger.info(f"🔄 Запрос отчета '{period_type}' от пользователя {user.id}")
-
-        user_data = self.db.get_user(user.id)
-
-        if not user_data or not user_data.get('api_token_encrypted'):
-            logger.warning(f"❌ Пользователь {user.id} не зарегистрирован")
-            await update.message.reply_text(
-                "❌ Сначала необходимо зарегистрироваться и указать API-токен.\n"
-                "Используйте /start для регистрации.",
-                reply_markup=get_main_menu()
-            )
-            return
-
-        # Получаем и расшифровываем токен
-        encrypted_token = user_data['api_token_encrypted']
-        api_token = security.decrypt(encrypted_token)
-
-        logger.info(f"🔑 Токен пользователя {user.id}: {api_token[:15]}...")
-
-        if not api_token:
-            logger.error(f"❌ Ошибка расшифровки токена для пользователя {user.id}")
-            await update.message.reply_text(
-                "❌ Ошибка расшифровки токена. Пожалуйста, обновите API-токен в настройках.",
-                reply_markup=get_settings_keyboard()
-            )
-            return
-
-        # Показываем сообщение о загрузке
-        loading_msg = await update.message.reply_text("⏳ Загружаем данные из МойСклад...")
-
-        try:
-            # Создаем API клиент
-            api = MoyskladAPI(api_token)
-            logger.info(f"📡 Создан API клиент для пользователя {user.id}")
-
-            # Получаем даты периода
-            date_from, date_to = get_period_dates(period_type)
-            logger.info(f"📅 Период: {date_from} - {date_to}")
-
-            # Получаем отчет
-            logger.info(f"📊 Запрос отчета из МойСклад...")
-            report = api.get_sales_report(date_from, date_to)
-
-            if report:
-                logger.info(f"✅ Отчет получен: {report.total_orders} заказов, {report.total_sales:.2f} руб.")
-
-                # Логируем запрос
-                self.db.log_request(user_data['id'], period_type, f"{date_from} - {date_to}")
-                logger.info(f"📝 Запрос залогирован в БД")
-
-                # Отправляем отчет
-                report_text = report.format_report()
-                await update.message.reply_text(
-                    report_text,
-                    parse_mode=ParseMode.MARKDOWN,
-                    reply_markup=get_report_keyboard()
-                )
-                logger.info(f"📨 Отчет отправлен пользователю {user.id}")
-
-                # Если есть детали, показываем топ-5 заказов
-                if report.details and len(report.details) > 0:
-                    details_text = "📋 *Последние заказы:*\n\n"
-                    for i, detail in enumerate(report.details[:5], 1):
-                        order_date = detail.get('created', '')[:10]
-                        order_sum = detail.get('sum', 0)
-                        details_text += f"{i}. {detail.get('name', '')}\n"
-                        details_text += f"   💰 {order_sum:,.2f} ₽ | 📅 {order_date}\n"
-                        details_text += f"   📊 Статус: {detail.get('state', 'Не указан')}\n\n"
-
-                    await update.message.reply_text(
-                        details_text,
-                        parse_mode=ParseMode.MARKDOWN
-                    )
-                    logger.info(f"📋 Детали заказов отправлены")
-            else:
-                logger.warning(f"⚠️ Отчет не получен для пользователя {user.id}")
-                await update.message.reply_text(
-                    "❌ Не удалось получить данные из МойСклад.\n"
-                    "Возможные причины:\n"
-                    "• Нет данных за выбранный период\n"
-                    "• Проблемы с подключением\n"
-                    "• Ошибка API\n\n"
-                    "Попробуйте другой период или проверьте настройки.",
-                    reply_markup=get_report_keyboard()
-                )
-
-        except Exception as e:
-            logger.error(f"❌ Ошибка при получении отчета: {e}", exc_info=True)
-            await update.message.reply_text(
-                f"❌ Произошла ошибка при получении данных.\n\n"
-                f"Ошибка: {str(e)[:100]}",
-                reply_markup=get_report_keyboard()
-            )
-
-        finally:
-            # Удаляем сообщение о загрузке
-            try:
-                await context.bot.delete_message(
-                    chat_id=update.effective_chat.id,
-                    message_id=loading_msg.message_id
-                )
-                logger.info(f"🗑 Сообщение о загрузке удалено")
-            except Exception as e:
-                logger.warning(f"⚠️ Не удалось удалить сообщение о загрузке: {e}")
 
     async def compare_today_yesterday(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Сравнение сегодня vs вчера"""
@@ -435,6 +386,10 @@ class MenuHandlers:
     async def compare_month(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Сравнение этого месяца с прошлым"""
         await self._compare_periods(update, context, 'month', 'last_month')
+
+    async def compare_year_ago(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Сравнение сегодняшнего дня с таким же днем год назад"""
+        await self._compare_periods(update, context, 'today', 'year_ago')
 
     async def _compare_periods(self, update: Update, context: ContextTypes.DEFAULT_TYPE,
                                current_period: str, previous_period: str):
@@ -522,8 +477,8 @@ class MenuHandlers:
             "🗓 *Произвольный период*\n\n"
             "Введите период в формате:\n"
             "`ДД.ММ.ГГГГ - ДД.ММ.ГГГГ`\n\n"
-            "Пример: `01.01.2024 - 31.01.2024`\n\n"
-            "Или введите одну дату для отчета за день: `01.01.2024`",
+            "Пример: `01.01.2026 - 31.01.2026`\n\n"
+            "Или введите одну дату для отчета за день: `01.01.2026`",
             parse_mode=ParseMode.MARKDOWN,
             reply_markup=get_back_keyboard()
         )
@@ -673,23 +628,88 @@ class MenuHandlers:
             parse_mode=ParseMode.MARKDOWN
         )
 
-    async def handle_retail_sales_report(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Обработка отчета по розничным продажам"""
-        await self._get_retail_report(update, context, 'today')
-
-    async def handle_combined_report(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Обработка объединенного отчета"""
-        await self._get_combined_report(update, context, 'today')
-
-    async def _get_retail_report(self, update: Update, context: ContextTypes.DEFAULT_TYPE, period_type: str):
-        """Получение отчета по розничным продажам"""
+    async def handle_retail_sales_report_menu(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Меню выбора периода для розничных продаж"""
         user = update.effective_user
         user_data = self.db.get_user(user.id)
 
         if not user_data or not user_data.get('api_token_encrypted'):
             await update.message.reply_text(
                 "❌ Сначала необходимо зарегистрироваться.",
-                reply_markup=get_main_menu()
+                reply_markup=get_main_menu(False)
+            )
+            return
+
+        # ✅ Сохраняем тип отчета в контексте
+        context.user_data['current_report_type'] = 'retail_sales'
+        logger.info(f"✅ Установлен тип отчета: retail_sales для пользователя {user.id}")
+
+        await update.message.reply_text(
+            "🛍 *Розничные продажи*\n\n"
+            "Выберите период для отчета:",
+            reply_markup=get_detailed_period_keyboard('retail_sales'),
+            parse_mode=ParseMode.MARKDOWN
+        )
+
+
+
+    # ===== ЗАКАЗЫ ПОКУПАТЕЛЕЙ =====
+    async def handle_customer_orders_menu(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Меню выбора периода для заказов покупателей"""
+        user = update.effective_user
+        user_data = self.db.get_user(user.id)
+
+        if not user_data or not user_data.get('api_token_encrypted'):
+            await update.message.reply_text(
+                "❌ Сначала необходимо зарегистрироваться.",
+                reply_markup=get_main_menu(False)
+            )
+            return
+
+        # ✅ Сохраняем тип отчета в контексте
+        context.user_data['current_report_type'] = 'customer_orders'
+        logger.info(f"✅ Установлен тип отчета: customer_orders для пользователя {user.id}")
+
+        await update.message.reply_text(
+            "📦 *Заказы покупателей*\n\n"
+            "Выберите период для отчета:",
+            reply_markup=get_detailed_period_keyboard('customer_orders'),
+            parse_mode=ParseMode.MARKDOWN
+        )
+
+    # ===== ОБЪЕДИНЕННЫЙ ОТЧЕТ =====
+    async def handle_combined_report_menu(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Меню выбора периода для объединенного отчета"""
+        user = update.effective_user
+        user_data = self.db.get_user(user.id)
+
+        if not user_data or not user_data.get('api_token_encrypted'):
+            await update.message.reply_text(
+                "❌ Сначала необходимо зарегистрироваться.",
+                reply_markup=get_main_menu(False)
+            )
+            return
+
+        # ✅ Сохраняем тип отчета в контексте
+        context.user_data['current_report_type'] = 'combined_report'
+        logger.info(f"✅ Установлен тип отчета: combined_report для пользователя {user.id}")
+
+        await update.message.reply_text(
+            "📊 *Объединенный отчет*\n\n"
+            "Выберите период для отчета:",
+            reply_markup=get_detailed_period_keyboard('combined_report'),
+            parse_mode=ParseMode.MARKDOWN
+        )
+
+    async def handle_top_products_month(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Отчет по товарам: топ-20 за текущий месяц"""
+        user = update.effective_user
+        user_data = self.db.get_user(user.id)
+
+        if not user_data or not user_data.get('api_token_encrypted'):
+            await update.message.reply_text(
+                "❌ Сначала необходимо зарегистрироваться.",
+                reply_markup=get_main_menu(False)
             )
             return
 
@@ -698,73 +718,62 @@ class MenuHandlers:
 
         if not api_token:
             await update.message.reply_text(
-                "❌ Ошибка расшифровки токена.",
+                "❌ Ошибка расшифровки токена. Обновите API-токен.",
                 reply_markup=get_settings_keyboard()
             )
             return
 
-        loading_msg = await update.message.reply_text("⏳ Загружаем данные по розничным продажам...")
+        # Период – текущий месяц
+        date_from, date_to = get_period_dates('month')
+
+        loading_msg = await update.message.reply_text("⏳ Формируем отчет по товарам за месяц...")
 
         try:
             api = MoyskladAPI(api_token)
-            date_from, date_to = get_period_dates(period_type)
+            top_items = api.get_top_products(date_from, date_to, limit=20)
 
-            report = api.get_retail_sales_report(date_from, date_to)
-
-            if report:
-                if report.total_orders > 0:
-                    # Основной отчет
-                    report_text = report.format_retail_report()
-                    await update.message.reply_text(
-                        report_text,
-                        parse_mode=ParseMode.MARKDOWN,
-                        reply_markup=get_detailed_reports_keyboard()
-                    )
-
-                    # Детали по торговым точкам (если есть)
-                    if report.retail_points:
-                        points_text = "🏪 *Топ торговых точек:*\n\n"
-                        for i, point in enumerate(report.retail_points[:5], 1):
-                            points_text += f"{i}. *{point['name']}*\n"
-                            points_text += f"   💰 {point['sales']:,.2f} ₽ ({point['share']:.1f}%)\n"
-
-                        await update.message.reply_text(
-                            points_text,
-                            parse_mode=ParseMode.MARKDOWN
-                        )
-
-                    # Последние операции
-                    if report.details:
-                        details_text = "📋 *Последние операции:*\n\n"
-                        for detail in report.details[:5]:
-                            sign = "➖" if detail['sum'] < 0 else "➕"
-                            details_text += f"{sign} {detail['name']}\n"
-                            details_text += f"   💰 {abs(detail['sum']):,.2f} ₽ | 🏪 {detail.get('store', 'Не указано')}\n"
-                            details_text += f"   📅 {detail.get('date', '')} | 📊 {detail.get('type', '')}\n\n"
-
-                        await update.message.reply_text(
-                            details_text,
-                            parse_mode=ParseMode.MARKDOWN
-                        )
-
-                    # Логируем запрос
-                    self.db.log_request(user_data['id'], 'retail_sales', f"{date_from} - {date_to}")
-
-                else:
-                    await update.message.reply_text(
-                        f"📭 Нет розничных продаж за период: {report.period}",
-                        reply_markup=get_detailed_reports_keyboard()
-                    )
-            else:
+            if not top_items:
                 await update.message.reply_text(
-                    "❌ Не удалось получить данные по розничным продажам.",
+                    "📭 Нет данных по продажам товаров за текущий месяц.",
                     reply_markup=get_detailed_reports_keyboard()
                 )
+                return
+
+            # Формируем текст отчета
+            from datetime import datetime
+            month_title = datetime.now().strftime('%m.%Y')
+
+            lines = [
+                f"📊 *Топ-20 товаров за месяц ({month_title})*",
+                "",
+            ]
+
+            for idx, item in enumerate(top_items, start=1):
+                lines.append(
+                    f"{idx}. *{item['name']}*\n"
+                    f"   Кол-во: {item['quantity']:.2f}\n"
+                    f"   Сумма: {item['amount']:,.2f} ₽"
+                )
+
+            text = "\n".join(lines)
+
+            await update.message.reply_text(
+                text,
+                parse_mode=ParseMode.MARKDOWN,
+                reply_markup=get_detailed_reports_keyboard()
+            )
+
+            # Логируем запрос
+            self.db.log_request(
+                user_data['id'],
+                'top_products_month',
+                f"{date_from} - {date_to}"
+            )
 
         except Exception as e:
-            logger.error(f"Ошибка при получении отчета по розничным продажам: {e}")
+            logger.error(f"❌ Ошибка при формировании отчета по товарам: {e}", exc_info=True)
             await update.message.reply_text(
-                f"❌ Ошибка: {str(e)[:100]}",
+                f"❌ Ошибка при формировании отчета: {str(e)[:120]}",
                 reply_markup=get_detailed_reports_keyboard()
             )
 
@@ -774,69 +783,425 @@ class MenuHandlers:
                     chat_id=update.effective_chat.id,
                     message_id=loading_msg.message_id
                 )
-            except:
+            except Exception:
                 pass
 
-    async def _get_combined_report(self, update: Update, context: ContextTypes.DEFAULT_TYPE, period_type: str):
-        """Получение объединенного отчета"""
-        user = update.effective_user
-        user_data = self.db.get_user(user.id)
+    async def handle_detailed_custom_period(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Универсальный обработчик произвольного периода для детальных отчетов"""
+        user_input = update.message.text.strip()
 
-        if not user_data or not user_data.get('api_token_encrypted'):
-            await update.message.reply_text(
-                "❌ Сначала необходимо зарегистрироваться.",
-                reply_markup=get_main_menu()
-            )
+        # Проверяем, находимся ли мы в потоке детальных отчетов
+        if not self._is_in_detailed_report_flow(context):
+            # Если нет - это обычный ввод дат, показываем главное меню
+            await self.show_main_menu(update, context)
             return
 
-        encrypted_token = user_data['api_token_encrypted']
-        api_token = security.decrypt(encrypted_token)
+        # Получаем тип отчета из контекста
+        report_type = context.user_data.get('detailed_report_type', 'customer_orders')
 
-        if not api_token:
+        # Если это кнопка "🗓 Произвольный период"
+        if user_input == "🗓 Произвольный период":
+            report_names = {
+                'retail_sales': 'розничных продаж',
+                'customer_orders': 'заказов покупателей',
+                'combined_report': 'объединенного отчета'
+            }
+
+            report_name = report_names.get(report_type, 'отчета')
+
             await update.message.reply_text(
-                "❌ Ошибка расшифровки токена.",
-                reply_markup=get_settings_keyboard()
+                f"🗓 *Произвольный период для {report_name}*\n\n"
+                "Введите период в формате:\n"
+                "`ДД.ММ.ГГГГ - ДД.ММ.ГГГГ`\n\n"
+                "Пример: `01.01.2026 - 31.01.2026`\n\n"
+                "Или введите одну дату для отчета за день: `01.01.2026`",
+                parse_mode=ParseMode.MARKDOWN,
+                reply_markup=get_back_keyboard()
             )
+
+            # Устанавливаем флаг ожидания ввода даты
+            context.user_data['waiting_for_detailed_period'] = True
             return
 
-        loading_msg = await update.message.reply_text("⏳ Формируем объединенный отчет...")
+        # Если это ввод даты (ожидаем после нажатия кнопки)
+        elif context.user_data.get('waiting_for_detailed_period'):
+            try:
+                if ' - ' in user_input:
+                    # Диапазон дат
+                    date1_str, date2_str = user_input.split(' - ')
+                    date1 = datetime.strptime(date1_str.strip(), '%d.%m.%Y')
+                    date2 = datetime.strptime(date2_str.strip(), '%d.%m.%Y')
 
-        try:
-            api = MoyskladAPI(api_token)
-            date_from, date_to = get_period_dates(period_type)
+                    if date1 > date2:
+                        date1, date2 = date2, date1
 
-            report = api.get_combined_sales_report(date_from, date_to)
+                    date_from = date1.strftime('%Y-%m-%d')
+                    date_to = date2.strftime('%Y-%m-%d')
+                    period_name = f"{date1_str} - {date2_str}"
+                else:
+                    # Одна дата
+                    date = datetime.strptime(user_input.strip(), '%d.%m.%Y')
+                    date_from = date_to = date.strftime('%Y-%m-%d')
+                    period_name = user_input
 
-            if report:
-                report_text = report.format_combined_report()
+                # Сохраняем период
+                context.user_data['detailed_custom_period'] = {
+                    'date_from': date_from,
+                    'date_to': date_to,
+                    'period_name': period_name
+                }
 
+                # Сбрасываем флаг
+                context.user_data.pop('waiting_for_detailed_period', None)
+
+                # ✅ ВАЖНО: Логируем какой отчет будет получен
+                logger.info(f"Получение отчета типа '{report_type}' за период {date_from} - {date_to}")
+
+                # Получаем отчет
+                await self._get_detailed_report_by_type(update, context, report_type, 'custom')
+
+            except ValueError:
                 await update.message.reply_text(
-                    report_text,
-                    parse_mode=ParseMode.MARKDOWN,
-                    reply_markup=get_detailed_reports_keyboard()
-                )
-
-                # Добавляем текстовую диаграмму для наглядности
-                diagram = self._generate_sales_diagram(report.retail_share, report.orders_share)
-                await update.message.reply_text(
-                    f"📊 *Распределение продаж:*\n\n{diagram}",
+                    "❌ Неверный формат даты.\n"
+                    "Используйте формат: `ДД.ММ.ГГГГ - ДД.ММ.ГГГГ`\n"
+                    "Пример: `01.01.2026 - 31.01.2026`",
                     parse_mode=ParseMode.MARKDOWN
                 )
 
-                # Логируем запрос
-                self.db.log_request(user_data['id'], 'combined_sales', f"{date_from} - {date_to}")
+        # Если это не дата и не кнопка - показываем меню детальных отчетов
+        else:
+            await self.show_detailed_reports_menu(update, context)
+
+    async def _handle_date_input(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Обработка ввода дат для произвольного периода"""
+        user_input = update.message.text.strip()
+
+        # ✅ Проверяем, ожидаем ли мы ввод дат
+        report_type = context.user_data.get('expecting_custom_period_for')
+
+        if not report_type:
+            # Если не ожидаем - это обычный ввод, показываем главное меню
+            logger.info(f"📅 Ввод дат без ожидания: '{user_input}'")
+            user = update.effective_user
+            user_data = self.db.get_user(user.id)
+            is_registered = user_data and user_data.get('api_token_encrypted')
+            await update.message.reply_text(
+                "📱 *Главное меню*\n\nВыберите нужный раздел:",
+                reply_markup=get_main_menu(is_registered),
+                parse_mode=ParseMode.MARKDOWN
+            )
+            return
+
+        logger.info(f"📅 Обработка дат '{user_input}' для отчета типа '{report_type}'")
+
+        try:
+            if ' - ' in user_input:
+                # Диапазон дат
+                date1_str, date2_str = user_input.split(' - ')
+                date1 = datetime.strptime(date1_str.strip(), '%d.%m.%Y')
+                date2 = datetime.strptime(date2_str.strip(), '%d.%m.%Y')
+
+                if date1 > date2:
+                    date1, date2 = date2, date1
+
+                date_from = date1.strftime('%Y-%m-%d')
+                date_to = date2.strftime('%Y-%m-%d')
+                period_name = f"{date1_str} - {date2_str}"
+            else:
+                # Одна дата
+                date = datetime.strptime(user_input.strip(), '%d.%m.%Y')
+                date_from = date_to = date.strftime('%Y-%m-%d')
+                period_name = user_input
+
+            # ✅ Сохраняем период
+            context.user_data['detailed_custom_period'] = {
+                'date_from': date_from,
+                'date_to': date_to,
+                'period_name': period_name
+            }
+
+            logger.info(f"📊 Получение отчета типа '{report_type}' за период {date_from} - {date_to}")
+
+            # ✅ Очищаем флаг ожидания
+            context.user_data.pop('expecting_custom_period_for', None)
+
+            # Получаем отчет
+            await self._get_detailed_report_by_type(update, context, report_type, 'custom')
+
+        except ValueError:
+            await update.message.reply_text(
+                "❌ Неверный формат даты.\n"
+                "Используйте формат: `ДД.ММ.ГГГГ - ДД.ММ.ГГГГ`\n\n"
+                "Попробуйте снова:",
+                parse_mode=ParseMode.MARKDOWN,
+                reply_markup=get_back_keyboard()
+            )
+
+
+    # ===== ОБРАБОТКА ВЫБОРА ПЕРИОДА =====
+    async def handle_detailed_period_selection(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Обработка выбора периода для детальных отчетов"""
+        user_input = update.message.text
+
+        # ✅ Берем тип отчета из контекста
+        report_type = context.user_data.get('current_report_type', 'customer_orders')
+        logger.info(f"📝 Выбор периода '{user_input}' для отчета типа '{report_type}'")
+
+        # Маппинг текста кнопок на типы периодов
+        period_mapping = {
+            '📅 Сегодня': 'today',
+            '📆 Неделя': 'week',
+            '📈 Месяц': 'month',
+            '🗓 Произвольный период': 'custom'
+        }
+
+        period_type = period_mapping.get(user_input)
+
+        if not period_type:
+            await update.message.reply_text(
+                "❌ Неизвестный период. Попробуйте снова.",
+                reply_markup=get_detailed_period_keyboard(report_type)
+            )
+            return
+
+        if period_type == 'custom':
+            # ✅ Запрашиваем произвольный период для текущего типа отчета
+            await self._ask_custom_period_for_report(update, context, report_type)
+            return
+
+        # Получаем отчет за выбранный период
+        await self._get_detailed_report_by_type(update, context, report_type, period_type)
+
+    async def _ask_custom_period_for_report(self, update: Update, context: ContextTypes.DEFAULT_TYPE, report_type: str):
+        """Запрос произвольного периода для указанного типа отчета"""
+        report_names = {
+            'retail_sales': 'розничных продаж',
+            'customer_orders': 'заказов покупателей',
+            'combined_report': 'объединенного отчета'
+        }
+
+        report_name = report_names.get(report_type, 'отчета')
+
+        logger.info(f"🗓 Запрос произвольного периода для отчета '{report_type}'")
+
+        await update.message.reply_text(
+            f"🗓 *Произвольный период для {report_name}*\n\n"
+            "Введите период в формате:\n"
+            "`ДД.ММ.ГГГГ - ДД.ММ.ГГГГ`\n\n"
+            "Пример: `01.01.2026 - 31.01.2026`\n\n"
+            "Или введите одну дату для отчета за день: `01.01.2026`",
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=get_back_keyboard()
+        )
+
+        # ✅ Сохраняем тип отчета для обработки ввода дат
+        context.user_data['expecting_custom_period_for'] = report_type
+        logger.info(f"💾 Ожидаем ввод дат для отчета типа '{report_type}'")
+
+
+
+
+
+    # async def ask_custom_period_for_detailed(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+    #     """Запрос произвольного периода для детальных отчетов"""
+    #     report_type = context.user_data.get('report_type', 'customer_orders')
+    #     report_names = {
+    #         'retail_sales': 'розничных продаж',
+    #         'customer_orders': 'заказов покупателей',
+    #         'combined_report': 'объединенного отчета'
+    #     }
+    #
+    #     report_name = report_names.get(report_type, 'отчета')
+    #
+    #     await update.message.reply_text(
+    #         f"🗓 *Произвольный период для {report_name}*\n\n"
+    #         "Введите период в формате:\n"
+    #         "`ДД.ММ.ГГГГ - ДД.ММ.ГГГГ`\n\n"
+    #         "Пример: `01.01.2024 - 31.01.2024`\n\n"
+    #         "Или введите одну дату для отчета за день: `01.01.2024`",
+    #         parse_mode=ParseMode.MARKDOWN,
+    #         reply_markup=get_back_keyboard()
+    #     )
+
+    # def _is_in_detailed_report_flow(context: ContextTypes.DEFAULT_TYPE) -> bool:
+    #     """Проверяем, находится ли пользователь в потоке детальных отчетов"""
+    #     return (
+    #             context.user_data.get('waiting_for_detailed_period') or
+    #             context.user_data.get('detailed_report_type') is not None
+    #     )
+
+    async def process_detailed_custom_period(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Обработка произвольного периода для детальных отчетов"""
+        user_input = update.message.text.strip()
+
+        # ✅ ВАЖНО: Берем тип отчета из нескольких мест
+        report_type = (
+                context.user_data.get('current_report_type') or
+                context.user_data.get('waiting_custom_period_type') or
+                context.user_data.get('detailed_report_type', 'customer_orders')
+        )
+
+        logger.info(f"📅 Обработка дат для отчета типа '{report_type}': '{user_input}'")
+
+        try:
+            if ' - ' in user_input:
+                # Диапазон дат
+                date1_str, date2_str = user_input.split(' - ')
+                date1 = datetime.strptime(date1_str.strip(), '%d.%m.%Y')
+                date2 = datetime.strptime(date2_str.strip(), '%d.%m.%Y')
+
+                if date1 > date2:
+                    date1, date2 = date2, date1
+
+                date_from = date1.strftime('%Y-%m-%d')
+                date_to = date2.strftime('%Y-%m-%d')
+                period_name = f"{date1_str} - {date2_str}"
+            else:
+                # Одна дата
+                date = datetime.strptime(user_input.strip(), '%d.%m.%Y')
+                date_from = date_to = date.strftime('%Y-%m-%d')
+                period_name = user_input
+
+            # ✅ ВАЖНО: Сохраняем период с правильным ключом
+            context.user_data['detailed_custom_period'] = {
+                'date_from': date_from,
+                'date_to': date_to,
+                'period_name': period_name
+            }
+
+            logger.info(f"📊 Получение отчета типа '{report_type}' за период {date_from} - {date_to}")
+
+            # Получаем отчет
+            await self._get_detailed_report_by_type(update, context, report_type, 'custom')
+
+            # Очищаем временные данные
+            context.user_data.pop('current_report_type', None)
+            context.user_data.pop('waiting_custom_period_type', None)
+
+            return ConversationHandler.END
+
+        except ValueError:
+            await update.message.reply_text(
+                "❌ Неверный формат даты.\n"
+                "Используйте формат: `ДД.ММ.ГГГГ - ДД.ММ.ГГГГ`",
+                parse_mode=ParseMode.MARKDOWN
+            )
+            return 'WAITING_DETAILED_CUSTOM_PERIOD'
+
+    async def _get_detailed_report_by_type(self, update: Update, context: ContextTypes.DEFAULT_TYPE,
+                                           report_type: str, period_type: str):
+        """Получение детального отчета по типу"""
+        user = update.effective_user
+        user_data = self.db.get_user(user.id)
+
+        if not user_data or not user_data.get('api_token_encrypted'):
+            await update.message.reply_text(
+                "❌ Сначала необходимо зарегистрироваться.",
+                reply_markup=get_main_menu(False)
+            )
+            return
+
+        encrypted_token = user_data['api_token_encrypted']
+        api_token = security.decrypt(encrypted_token)
+
+        if not api_token:
+            await update.message.reply_text(
+                "❌ Ошибка расшифровки токена.",
+                reply_markup=get_settings_keyboard()
+            )
+            return
+
+        # Определяем даты периода
+        if period_type == 'custom':
+            period_data = context.user_data.get('detailed_custom_period', {})
+
+            if not period_data:
+                logger.error(f"❌ Нет данных периода для отчета типа '{report_type}'")
+                await update.message.reply_text(
+                    "❌ Ошибка: период не указан.",
+                    reply_markup=get_detailed_period_keyboard(report_type)
+                )
+                return
+
+            date_from = period_data['date_from']
+            date_to = period_data['date_to']
+            period_display = period_data['period_name']
+
+            # ✅ Очищаем период после использования
+            context.user_data.pop('detailed_custom_period', None)
+        else:
+            date_from, date_to = get_period_dates(period_type)
+            period_display = period_type
+
+        logger.info(f"📊 ЗАПРОС: report_type='{report_type}', period='{date_from} - {date_to}'")
+
+        loading_msg = await update.message.reply_text("⏳ Загружаем данные...")
+
+        try:
+            api = MoyskladAPI(api_token)
+
+            if report_type == 'retail_sales':
+                # ✅ ВАЖНО: Используем правильный метод для розничных продаж
+                logger.info(f"🛍 Вызов get_retail_sales_report()")
+                report = api.get_retail_sales_report(date_from, date_to)
+
+                if report:
+                    report.period = period_display
+                    report_text = report.format_retail_report()
+                    logger.info(
+                        f"✅ Получен отчет по розничным продажам: {report.total_orders} чеков, {report.total_sales:.2f} руб")
+                else:
+                    report_text = f"📭 Нет розничных продаж за период: {period_display}"
+                    logger.info(f"📭 Нет данных по розничным продажам")
+
+            elif report_type == 'customer_orders':
+                logger.info(f"📦 Вызов get_sales_report()")
+                report = api.get_sales_report(date_from, date_to)
+
+                if report:
+                    report.period = period_display
+                    report_text = report.format_report()
+                    logger.info(
+                        f"✅ Получен отчет по заказам: {report.total_orders} заказов, {report.total_sales:.2f} руб")
+                else:
+                    report_text = f"📭 Нет заказов покупателей за период: {period_display}"
+                    logger.info(f"📭 Нет данных по заказам")
+
+            elif report_type == 'combined_report':
+                logger.info(f"📊 Вызов get_combined_sales_report()")
+                report = api.get_combined_sales_report(date_from, date_to)
+
+                if report:
+                    report.period = period_display
+                    report_text = report.format_combined_report()
+                    logger.info(f"✅ Получен объединенный отчет")
+                else:
+                    report_text = f"📭 Нет данных для объединенного отчета за период: {period_display}"
+                    logger.info(f"📭 Нет данных для объединенного отчета")
 
             else:
-                await update.message.reply_text(
-                    "❌ Не удалось сформировать объединенный отчет.",
-                    reply_markup=get_detailed_reports_keyboard()
-                )
+                report_text = "❌ Неизвестный тип отчета"
+                logger.error(f"❌ Неизвестный тип отчета: {report_type}")
+
+            # Отправляем отчет
+            await update.message.reply_text(
+                report_text,
+                parse_mode=ParseMode.MARKDOWN,
+                reply_markup=get_detailed_period_keyboard(report_type)
+            )
+
+            # Логируем запрос
+            self.db.log_request(
+                user_data['id'],
+                f'{report_type}_{period_type}',
+                f"{date_from} - {date_to}"
+            )
 
         except Exception as e:
-            logger.error(f"Ошибка при получении объединенного отчета: {e}")
+            logger.error(f"❌ Ошибка при получении отчета {report_type}: {e}", exc_info=True)
             await update.message.reply_text(
-                f"❌ Ошибка: {str(e)[:100]}",
-                reply_markup=get_detailed_reports_keyboard()
+                f"❌ Ошибка при получении отчета: {str(e)[:100]}",
+                reply_markup=get_detailed_period_keyboard(report_type)
             )
 
         finally:
@@ -847,6 +1212,11 @@ class MenuHandlers:
                 )
             except:
                 pass
+
+    async def back_to_detailed_reports(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Возврат к меню детальных отчетов"""
+        await self.show_detailed_reports_menu(update, context)
+
 
     def _generate_sales_diagram(self, retail_share: float, orders_share: float) -> str:
         """Генерация текстовой диаграммы распределения продаж"""
@@ -870,12 +1240,13 @@ class MenuHandlers:
 
         # Проверяем регистрацию
         user_data = self.db.get_user(user.id)
+        is_registered = user_data and user_data.get('api_token_encrypted')
 
-        if not user_data or not user_data.get('api_token_encrypted'):
+        if not is_registered:
             await update.message.reply_text(
                 "❌ Сначала необходимо зарегистрироваться.\n"
                 "Используйте /start для регистрации.",
-                reply_markup=get_main_menu(user.id)
+                reply_markup=get_main_menu(False)  # ✅ ПРАВИЛЬНО
             )
             return
 
@@ -905,7 +1276,7 @@ class MenuHandlers:
                 await update.message.reply_text(
                     report_text,
                     parse_mode=ParseMode.MARKDOWN,
-                    reply_markup=get_main_menu(user.id)
+                    reply_markup=get_main_menu(True)
                 )
 
                 # Логируем успешный запрос
@@ -919,7 +1290,7 @@ class MenuHandlers:
                     "• Нет данных в МойСклад за указанные периоды\n"
                     "• Проблемы с подключением к API\n"
                     "• Ошибка в настройках токена",
-                    reply_markup=get_main_menu(user.id)
+                    reply_markup=get_main_menu(False)
                 )
 
         except Exception as e:
@@ -928,7 +1299,7 @@ class MenuHandlers:
                 f"❌ Произошла ошибка при формировании отчета:\n\n"
                 f"```{str(e)[:150]}```",
                 parse_mode=ParseMode.MARKDOWN,
-                reply_markup=get_main_menu(user.id)
+                reply_markup=get_main_menu(False)
             )
 
         finally:
@@ -940,3 +1311,124 @@ class MenuHandlers:
                 )
             except:
                 pass
+
+
+class NotificationHandlers:
+    """Обработчики управления уведомлениями"""
+
+    def __init__(self, db: Database):
+        self.db = db
+
+    async def notifications_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Показать статус уведомлений и кнопки управления"""
+        user = update.effective_user
+        user_data = self.db.get_user(user.id)
+
+        if not user_data or not user_data.get('api_token_encrypted'):
+            await update.message.reply_text(
+                "❌ Сначала необходимо зарегистрироваться и указать API-токен.\n"
+                "Используйте /start для регистрации.",
+                reply_markup=get_main_menu(False)
+            )
+            return
+
+        # Получаем текущий статус уведомлений
+        notification_enabled = user_data.get('notification_enabled', 0)
+        is_enabled = bool(notification_enabled)
+
+        # Формируем текст сообщения
+        status_emoji = "✅" if is_enabled else "❌"
+        status_text = "включены" if is_enabled else "выключены"
+        
+        message_text = (
+            f"🔔 *Управление уведомлениями*\n\n"
+            f"Статус: Уведомления {status_text} {status_emoji}\n\n"
+        )
+        
+        if is_enabled:
+            message_text += (
+                "*Вы получаете автоматические отчеты:*\n"
+                "• Ежедневно в 9:00 - статистика за вчера\n"
+                "• Понедельник в 9:05 - статистика за неделю\n"
+                "• 1 число месяца в 9:00 - отчет за месяц\n\n"
+                "Используйте кнопку ниже для управления."
+            )
+        else:
+            message_text += (
+                "*При включении вы будете получать:*\n"
+                "• Ежедневно в 9:00 - статистика за вчера\n"
+                "• Понедельник в 9:05 - статистика за неделю\n"
+                "• 1 число месяца в 9:00 - отчет за месяц\n\n"
+                "Нажмите кнопку ниже, чтобы включить уведомления."
+            )
+
+        await update.message.reply_text(
+            message_text,
+            reply_markup=get_notifications_keyboard(is_enabled),
+            parse_mode=ParseMode.MARKDOWN
+        )
+
+    async def toggle_notifications(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Обработчик кнопок включения/выключения уведомлений"""
+        user = update.effective_user
+        button_text = update.message.text
+
+        # Проверяем регистрацию
+        user_data = self.db.get_user(user.id)
+        if not user_data or not user_data.get('api_token_encrypted'):
+            await update.message.reply_text(
+                "❌ Сначала необходимо зарегистрироваться.",
+                reply_markup=get_main_menu(False)
+            )
+            return
+
+        # Определяем действие по тексту кнопки
+        if button_text == "🔔 Включить уведомления":
+            # Включаем уведомления
+            success = self.db.update_notification_setting(user.id, True)
+            
+            if success:
+                logger.info(f"✅ Уведомления включены для пользователя {user.id}")
+                await update.message.reply_text(
+                    "✅ *Уведомления включены!*\n\n"
+                    "Вы будете получать автоматические отчеты:\n"
+                    "• Ежедневно в 9:00 - статистика за вчера\n"
+                    "• Понедельник в 9:05 - статистика за неделю\n"
+                    "• 1 число месяца в 9:00 - отчет за месяц\n\n"
+                    "_Время указано по московскому часовому поясу_",
+                    reply_markup=get_notifications_keyboard(True),
+                    parse_mode=ParseMode.MARKDOWN
+                )
+            else:
+                await update.message.reply_text(
+                    "❌ Ошибка при включении уведомлений. Попробуйте позже.",
+                    reply_markup=get_notifications_keyboard(False)
+                )
+
+        elif button_text == "🔕 Выключить уведомления":
+            # Выключаем уведомления
+            success = self.db.update_notification_setting(user.id, False)
+            
+            if success:
+                logger.info(f"🔕 Уведомления выключены для пользователя {user.id}")
+                await update.message.reply_text(
+                    "🔕 *Уведомления выключены*\n\n"
+                    "Вы больше не будете получать автоматические отчеты.\n"
+                    "Вы всегда можете включить их снова через /notifications",
+                    reply_markup=get_notifications_keyboard(False),
+                    parse_mode=ParseMode.MARKDOWN
+                )
+            else:
+                await update.message.reply_text(
+                    "❌ Ошибка при выключении уведомлений. Попробуйте позже.",
+                    reply_markup=get_notifications_keyboard(True)
+                )
+
+        elif button_text == "◀️ Назад в меню":
+            # Возврат в главное меню
+            is_registered = user_data and user_data.get('api_token_encrypted')
+            await update.message.reply_text(
+                "📱 *Главное меню*\n\nВыберите нужный раздел:",
+                reply_markup=get_main_menu(is_registered),
+                parse_mode=ParseMode.MARKDOWN
+            )

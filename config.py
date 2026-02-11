@@ -23,9 +23,15 @@ class Config:
     list(map(int, os.getenv("ADMIN_IDS", "").split(","))) if os.getenv("ADMIN_IDS") else []
                                  )
 
-    # Папки для данных
-    DATA_DIR: str = "src/data"
-    LOGS_DIR: str = "src/logs"
+    # Папки для данных (относительно корня проекта)
+    DATA_DIR: str = "data"
+    LOGS_DIR: str = "logs"
+
+    # Настройки планировщика
+    SCHEDULER_TIMEZONE: str = 'Europe/Moscow'
+    DAILY_REPORT_TIME: tuple = (9, 0)  # час, минута
+    WEEKLY_REPORT_TIME: tuple = (9, 5)  # понедельник в 9:05
+    MONTHLY_REPORT_TIME: tuple = (9, 0)  # 1 число месяца в 9:00
 
     def validate(self) -> bool:
         """Проверка обязательных настроек"""
