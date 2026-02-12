@@ -653,6 +653,29 @@ class MenuHandlers:
 
 
 
+    # ===== ОТГРУЗКИ =====
+    async def handle_demand_menu(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Меню выбора периода для отгрузок"""
+        user = update.effective_user
+        user_data = self.db.get_user(user.id)
+
+        if not user_data or not user_data.get('api_token_encrypted'):
+            await update.message.reply_text(
+                "❌ Сначала необходимо зарегистрироваться.",
+                reply_markup=get_main_menu(False)
+            )
+            return
+
+        context.user_data['current_report_type'] = 'demand'
+        logger.info(f"✅ Установлен тип отчета: demand для пользователя {user.id}")
+
+        await update.message.reply_text(
+            "🚚 *Отгрузки*\n\n"
+            "Выберите период для отчета:",
+            reply_markup=get_detailed_period_keyboard('demand'),
+            parse_mode=ParseMode.MARKDOWN
+        )
+
     # ===== ЗАКАЗЫ ПОКУПАТЕЛЕЙ =====
     async def handle_customer_orders_menu(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Меню выбора периода для заказов покупателей"""
@@ -735,7 +758,8 @@ class MenuHandlers:
             if not top_items:
                 await update.message.reply_text(
                     "📭 Нет данных по продажам товаров за текущий месяц.",
-                    reply_markup=get_detailed_reports_keyboard()
+                    # После топа товаров остаемся в разделе аналитики
+                    reply_markup=get_analytics_keyboard()
                 )
                 return
 
@@ -752,7 +776,7 @@ class MenuHandlers:
                 lines.append(
                     f"{idx}. *{item['name']}*\n"
                     f"   Кол-во: {item['quantity']:.2f}\n"
-                    f"   Сумма: {item['amount']:,.2f} ₽"
+                    f"   Сумма: {item['amount']:,.2f} ₽\n"
                 )
 
             text = "\n".join(lines)
@@ -760,7 +784,8 @@ class MenuHandlers:
             await update.message.reply_text(
                 text,
                 parse_mode=ParseMode.MARKDOWN,
-                reply_markup=get_detailed_reports_keyboard()
+                # После отчета по топ-20 возвращаем меню аналитики
+                reply_markup=get_analytics_keyboard()
             )
 
             # Логируем запрос
@@ -774,7 +799,8 @@ class MenuHandlers:
             logger.error(f"❌ Ошибка при формировании отчета по товарам: {e}", exc_info=True)
             await update.message.reply_text(
                 f"❌ Ошибка при формировании отчета: {str(e)[:120]}",
-                reply_markup=get_detailed_reports_keyboard()
+                # В случае ошибки тоже показываем аналитику, а не детальные отчеты
+                reply_markup=get_analytics_keyboard()
             )
 
         finally:
@@ -804,6 +830,7 @@ class MenuHandlers:
             report_names = {
                 'retail_sales': 'розничных продаж',
                 'customer_orders': 'заказов покупателей',
+                'demand': 'отгрузок',
                 'combined_report': 'объединенного отчета'
             }
 
@@ -977,6 +1004,7 @@ class MenuHandlers:
         report_names = {
             'retail_sales': 'розничных продаж',
             'customer_orders': 'заказов покупателей',
+            'demand': 'отгрузок',
             'combined_report': 'объединенного отчета'
         }
 
@@ -1166,6 +1194,19 @@ class MenuHandlers:
                 else:
                     report_text = f"📭 Нет заказов покупателей за период: {period_display}"
                     logger.info(f"📭 Нет данных по заказам")
+
+            elif report_type == 'demand':
+                logger.info(f"🚚 Вызов get_demand_report()")
+                report = api.get_demand_report(date_from, date_to)
+
+                if report:
+                    report.period = period_display
+                    report_text = report.format_demand_report()
+                    logger.info(
+                        f"✅ Получен отчет по отгрузкам: {report.total_orders} отгрузок, {report.total_sales:.2f} руб")
+                else:
+                    report_text = f"📭 Нет отгрузок за период: {period_display}"
+                    logger.info(f"📭 Нет данных по отгрузкам")
 
             elif report_type == 'combined_report':
                 logger.info(f"📊 Вызов get_combined_sales_report()")

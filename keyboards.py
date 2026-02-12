@@ -60,6 +60,7 @@ def get_analytics_keyboard():
     keyboard = [
         [KeyboardButton("📈 Сегодня vs Вчера"), KeyboardButton("📅 Год назад")],
         [KeyboardButton("📆 Неделя vs Прошлая"), KeyboardButton("📊 Месяц vs Прошлый")],
+        [KeyboardButton("🧾 Топ-20 товаров")],
         [KeyboardButton("🔙 Назад")]
     ]
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
@@ -70,8 +71,8 @@ def get_detailed_reports_keyboard():
     keyboard = [
         [KeyboardButton("🛍 Розничные продажи")],
         [KeyboardButton("📦 Заказы покупателей")],
+        [KeyboardButton("🚚 Отгрузки")],
         [KeyboardButton("📊 Объединенный отчет")],
-        [KeyboardButton("🧾 Топ-20 товаров")],
         [KeyboardButton("🔙 Назад")]
     ]
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)

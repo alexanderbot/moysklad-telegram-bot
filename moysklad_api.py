@@ -40,6 +40,16 @@ class MoyskladReport:
             f"📈 *Товаров продано:* {self.products_count}\n"
         )
 
+    def format_demand_report(self) -> str:
+        """Форматирование отчета по отгрузкам для Telegram"""
+        return (
+            f"🚚 *Отгрузки за {self.period}*\n\n"
+            f"💰 *Общая сумма:* {self.total_sales:,.2f} ₽\n"
+            f"📦 *Количество отгрузок:* {self.total_orders}\n"
+            f"🧮 *Средняя отгрузка:* {self.average_order:,.2f} ₽\n"
+            f"📈 *Товаров отгружено:* {self.products_count}\n"
+        )
+
 @dataclass
 class RetailSalesReport(MoyskladReport):
     """Отчет по розничным продажам с детализацией"""
@@ -237,25 +247,43 @@ class MoyskladAPI:
         # ✅ ИСПРАВЛЕНО: Добавляем expand=positions чтобы получить позиции сразу
         params = {
             "filter": f"created>={date_from} 00:00:00;created<={date_to} 23:59:59",
-            "limit": 1000,
+            "limit": 1000,  # Максимум на один запрос в API
             "order": "created,desc",
             "expand": "positions"  # ✅ ЗАГРУЖАЕМ ПОЗИЦИИ ВМЕСТЕ С ЗАКАЗАМИ
         }
 
         logger.info(f"📋 Оптимизированные параметры запроса: expand=positions")
 
-        # Получаем заказы покупателей
+        # Получаем заказы покупателей (с пагинацией)
         endpoint = "entity/customerorder"
         logger.info(f"🌐 Запрос к эндпоинту: {endpoint}")
 
-        data = self._make_request(endpoint, params)
+        orders: list[dict] = []
+        offset = 0
+        while True:
+            params["offset"] = offset
+            page_data = self._make_request(endpoint, params)
 
-        if not data or 'rows' not in data:
-            logger.error("❌ Нет данных от API")
-            return None
+            if not page_data or "rows" not in page_data:
+                if offset == 0:
+                    logger.error("❌ Нет данных от API")
+                    return None
+                break
 
-        orders = data['rows']
-        logger.info(f"✅ Получено заказов с позициями: {len(orders)}")
+            rows = page_data.get("rows", [])
+            orders.extend(rows)
+            logger.info(f"✅ Получено заказов с позициями (накопительно): {len(orders)}")
+
+            # Если вернулось меньше лимита — это последняя страница
+            if len(rows) < params["limit"]:
+                break
+
+            offset += params["limit"]
+
+            # Защита от бесконечного цикла
+            if offset > 100000:
+                logger.warning("⚠️ Достигнут защитный лимит 100000 заказов покупателей")
+                break
 
         # Дополнительная фильтрация на нашей стороне (на всякий случай)
         filtered_orders = []
@@ -343,6 +371,101 @@ class MoyskladAPI:
             details=details[:10]  # Ограничиваем детали
         )
 
+    def get_demand_report(self, date_from: str, date_to: str) -> Optional[MoyskladReport]:
+        """
+        Получение отчета по отгрузкам (реализация товаров и услуг) за период.
+        Эндпоинт: entity/demand
+        """
+        logger.info(f"📊 Запрос отчета по отгрузкам с {date_from} по {date_to}")
+
+        params = {
+            "filter": f"moment>={date_from} 00:00:00;moment<={date_to} 23:59:59",
+            "limit": 1000,  # Максимум на один запрос в API
+            "order": "moment,desc",
+            "expand": "positions"
+        }
+
+        endpoint = "entity/demand"
+        # Пагинация по отгрузкам
+        demands: list[dict] = []
+        offset = 0
+        while True:
+            params["offset"] = offset
+            page_data = self._make_request(endpoint, params)
+
+            if not page_data or "rows" not in page_data:
+                if offset == 0:
+                    logger.error("❌ Нет данных по отгрузкам")
+                    return None
+                break
+
+            rows = page_data.get("rows", [])
+            demands.extend(rows)
+            logger.info(f"✅ Получено отгрузок (накопительно): {len(demands)}")
+
+            if len(rows) < params["limit"]:
+                break
+
+            offset += params["limit"]
+
+            if offset > 100000:
+                logger.warning("⚠️ Достигнут защитный лимит 100000 отгрузок")
+                break
+
+        if len(demands) == 0:
+            return MoyskladReport(
+                period=f"{date_from} - {date_to}" if date_from != date_to else date_from,
+                total_sales=0,
+                total_orders=0,
+                average_order=0,
+                products_count=0,
+                details=[]
+            )
+
+        total_sales = 0
+        products_count = 0
+        details = []
+
+        for demand in demands:
+            demand_sum = demand.get('sum', 0) / 100
+            total_sales += demand_sum
+
+            demand_id = demand.get('id')
+            demand_name = demand.get('name', f"Отгрузка {demand_id[:8]}" if demand_id else "Без номера")
+            demand_date = demand.get('moment', '')[:10] if demand.get('moment') else 'Неизвестно'
+
+            positions = demand.get('positions', {}).get('rows', [])
+            for pos in positions:
+                quantity = pos.get('quantity', 0)
+                products_count += quantity
+
+            demand_state = demand.get('state', {}).get('name', 'Новый')
+            agent = demand.get('agent', {})
+            agent_name = agent.get('name', '—') if agent else '—'
+
+            details.append({
+                'id': demand_id,
+                'name': demand_name,
+                'sum': demand_sum,
+                'created': demand_date,
+                'state': demand_state,
+                'agent': agent_name
+            })
+
+        total_orders = len(demands)
+        average_order = total_sales / total_orders if total_orders > 0 else 0
+        period = f"{date_from} - {date_to}" if date_from != date_to else date_from
+
+        logger.info(f"📈 Итоги отгрузок: {total_orders} шт, сумма={total_sales:.2f} ₽, товаров={int(products_count)}")
+
+        return MoyskladReport(
+            period=period,
+            total_sales=total_sales,
+            total_orders=total_orders,
+            average_order=average_order,
+            products_count=int(products_count),
+            details=details[:10]
+        )
 
     def get_detailed_sales_report(self, date_from: str, date_to: str) -> Optional[Dict]:
         """Получение детального отчета о продажах"""
@@ -385,7 +508,7 @@ class MoyskladAPI:
         # Основные параметры для розничных продаж
         params = {
             "filter": f"moment>={date_from} 00:00:00;moment<={date_to} 23:59:59",
-            "limit": 1000,
+            "limit": 1000,  # Максимум на один запрос в API
             "order": "moment,desc",
             "expand": "positions,retailStore,retailShift"
         }
@@ -393,24 +516,62 @@ class MoyskladAPI:
         endpoint = "entity/retaildemand"
         logger.info(f"🌐 Оптимизированный запрос: expand=positions,retailStore,retailShift")
 
-        data = self._make_request(endpoint, params)
+        # 🔁 ПАГИНАЦИЯ: загружаем все страницы по 1000 записей
+        retail_demands: list[dict] = []
+        offset = 0
+        while True:
+            params["offset"] = offset
+            page_data = self._make_request(endpoint, params)
 
-        if not data or 'rows' not in data:
-            logger.error("❌ Нет данных по розничным продажам")
-            return None
+            if not page_data or "rows" not in page_data:
+                if offset == 0:
+                    logger.error("❌ Нет данных по розничным продажам")
+                    return None
+                break
 
-        retail_demands = data['rows']
-        logger.info(f"✅ Получено розничных продаж: {len(retail_demands)}")
+            rows = page_data.get("rows", [])
+            retail_demands.extend(rows)
+            logger.info(f"✅ Получено розничных продаж (накопительно): {len(retail_demands)}")
 
-        # Получаем возвраты ОТДЕЛЬНЫМ запросом
+            # Если вернулось меньше лимита — это последняя страница
+            if len(rows) < params["limit"]:
+                break
+
+            offset += params["limit"]
+
+            # Защита от бесконечного цикла на случай странного ответа API
+            if offset > 100000:
+                logger.warning("⚠️ Достигнут защитный лимит 100000 записей по розничным продажам")
+                break
+
+        # Получаем возвраты ОТДЕЛЬНЫМ запросом с пагинацией
         returns_params = {
             "filter": f"moment>={date_from} 00:00:00;moment<={date_to} 23:59:59",
             "limit": 1000,
             "expand": "positions,retailStore"
         }
 
-        returns_data = self._make_request("entity/retailsalesreturn", returns_params)
-        returns = returns_data.get('rows', []) if returns_data else []
+        returns: list[dict] = []
+        offset = 0
+        while True:
+            returns_params["offset"] = offset
+            returns_data = self._make_request("entity/retailsalesreturn", returns_params)
+
+            if not returns_data or "rows" not in returns_data:
+                break
+
+            rows = returns_data.get("rows", [])
+            returns.extend(rows)
+
+            if len(rows) < returns_params["limit"]:
+                break
+
+            offset += returns_params["limit"]
+
+            if offset > 100000:
+                logger.warning("⚠️ Достигнут защитный лимит 100000 записей по возвратам розничных продаж")
+                break
+
         logger.info(f"🔄 Найдено возвратов: {len(returns)}")
 
         # ===== ИСПРАВЛЕНИЕ НАЧИНАЕТСЯ ЗДЕСЬ =====
@@ -603,25 +764,37 @@ class MoyskladAPI:
             orders = orders_data['rows']
             logger.info(f"📦 Заказы покупателей для топа: {len(orders)}")
 
-            for order in orders:
-                order_id = order.get('id')
-                if not order_id:
-                    continue
+            # Собираем ID заказов, для которых нужно загрузить позиции
+            order_ids = [o.get("id") for o in orders if o.get("id")]
+            logger.info(f"📦 Будет загружено позиций для {len(order_ids)} заказов (ограниченная параллельность)")
 
-                # Загружаем позиции заказа отдельным запросом
-                pos_data = self._make_request(f"entity/customerorder/{order_id}/positions", {"limit": 1000})
-                positions = pos_data.get('rows', []) if pos_data and 'rows' in pos_data else []
+            def load_order_positions(order_id: str) -> List[Dict[str, Any]]:
+                """
+                Загрузка позиций одного заказа.
+                Используем expand=assortment, чтобы сразу получить имя товара и
+                не делать дополнительные запросы в _get_assortment_name.
+                """
+                pos_data = self._make_request(
+                    f"entity/customerorder/{order_id}/positions",
+                    {"limit": 1000, "expand": "assortment"}
+                )
+                return pos_data.get("rows", []) if pos_data and "rows" in pos_data else []
 
-                for pos in positions:
-                    assortment = pos.get('assortment', {}) or {}
-                    name = self._get_assortment_name(assortment)
-                    quantity = float(pos.get('quantity', 0) or 0)
-                    price = (pos.get('price') or 0) / 100  # цена в рублях
-                    amount = quantity * price
+            if order_ids:
+                # Ограничиваем количество одновременных запросов, чтобы не ловить 429
+                max_workers = min(3, len(order_ids))
+                with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                    for positions in executor.map(load_order_positions, order_ids):
+                        for pos in positions:
+                            assortment = pos.get("assortment", {}) or {}
+                            name = self._get_assortment_name(assortment)
+                            quantity = float(pos.get("quantity", 0) or 0)
+                            price = (pos.get("price") or 0) / 100  # цена в рублях
+                            amount = quantity * price
 
-                    item = products.setdefault(name, {"quantity": 0.0, "amount": 0.0})
-                    item["quantity"] += quantity
-                    item["amount"] += amount
+                            item = products.setdefault(name, {"quantity": 0.0, "amount": 0.0})
+                            item["quantity"] += quantity
+                            item["amount"] += amount
 
             logger.info(f"📦 Уникальных товаров из заказов: {len(products)}")
         else:
@@ -639,25 +812,36 @@ class MoyskladAPI:
             retail_demands = retail_data['rows']
             logger.info(f"🛍 Розничные продажи для топа: {len(retail_demands)}")
 
-            for demand in retail_demands:
-                demand_id = demand.get('id')
-                if not demand_id:
-                    continue
+            # Собираем ID розничных продаж
+            retail_ids = [d.get("id") for d in retail_demands if d.get("id")]
+            logger.info(f"🛍 Будет загружено позиций для {len(retail_ids)} розничных продаж (ограниченная параллельность)")
 
-                # Загружаем позиции розничной продажи отдельным запросом
-                pos_data = self._make_request(f"entity/retaildemand/{demand_id}/positions", {"limit": 1000})
-                positions = pos_data.get('rows', []) if pos_data and 'rows' in pos_data else []
+            def load_retail_positions(demand_id: str) -> List[Dict[str, Any]]:
+                """
+                Загрузка позиций одной розничной продажи.
+                Также используем expand=assortment для получения имени товара.
+                """
+                pos_data = self._make_request(
+                    f"entity/retaildemand/{demand_id}/positions",
+                    {"limit": 1000, "expand": "assortment"}
+                )
+                return pos_data.get("rows", []) if pos_data and "rows" in pos_data else []
 
-                for pos in positions:
-                    assortment = pos.get('assortment', {}) or {}
-                    name = self._get_assortment_name(assortment)
-                    quantity = float(pos.get('quantity', 0) or 0)
-                    price = (pos.get('price') or 0) / 100  # цена в рублях
-                    amount = quantity * price
+            if retail_ids:
+                # Ограничиваем количество одновременных запросов, чтобы не ловить 429
+                max_workers = min(3, len(retail_ids))
+                with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                    for positions in executor.map(load_retail_positions, retail_ids):
+                        for pos in positions:
+                            assortment = pos.get("assortment", {}) or {}
+                            name = self._get_assortment_name(assortment)
+                            quantity = float(pos.get("quantity", 0) or 0)
+                            price = (pos.get("price") or 0) / 100  # цена в рублях
+                            amount = quantity * price
 
-                    item = products.setdefault(name, {"quantity": 0.0, "amount": 0.0})
-                    item["quantity"] += quantity
-                    item["amount"] += amount
+                            item = products.setdefault(name, {"quantity": 0.0, "amount": 0.0})
+                            item["quantity"] += quantity
+                            item["amount"] += amount
 
             logger.info(f"🛍 Уникальных товаров с учётом розницы: {len(products)}")
         else:
