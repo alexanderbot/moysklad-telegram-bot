@@ -234,6 +234,37 @@ class Database:
                 return bool(result['notification_enabled'])
             return None
 
+    def delete_user(self, telegram_id: int) -> bool:
+        """
+        Полное удаление пользователя и связанных данных из БД.
+        Удаляются:
+        - запись в users
+        - связанные настройки и логи запросов.
+        """
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+
+            # Получаем внутренний id пользователя
+            cursor.execute("SELECT id FROM users WHERE telegram_id = ?", (telegram_id,))
+            user = cursor.fetchone()
+
+            if not user:
+                logger.info(f"Попытка удаления несуществующего пользователя {telegram_id}")
+                return False
+
+            user_id = user["id"]
+
+            # Сначала удаляем логи запросов и настройки (на случай отсутствия каскадов)
+            cursor.execute("DELETE FROM request_logs WHERE user_id = ?", (user_id,))
+            cursor.execute("DELETE FROM user_settings WHERE user_id = ?", (user_id,))
+            cursor.execute("DELETE FROM users WHERE id = ?", (user_id,))
+
+            deleted = cursor.rowcount > 0
+            if deleted:
+                logger.info(f"Пользователь {telegram_id} (id={user_id}) успешно удалён из БД")
+
+            return deleted
+
 
 # Создаем синглтон экземпляр БД
 def init_database(db_path: str) -> Database:

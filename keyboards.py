@@ -25,7 +25,10 @@ def get_main_menu(is_registered: bool = False):
 
 def get_phone_keyboard():
     """Клавиатура для запроса номера телефона"""
-    keyboard = [[KeyboardButton("📱 Поделиться номером", request_contact=True)]]
+    keyboard = [
+        [KeyboardButton("📱 Поделиться номером", request_contact=True)],
+        [KeyboardButton("❌ Отмена регистрации")]
+    ]
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True, one_time_keyboard=True)
 
 
@@ -44,6 +47,7 @@ def get_settings_keyboard():
     keyboard = [
         [KeyboardButton("🔑 Установить API-токен")],
         [KeyboardButton("🔄 Обновить токен")],
+        [KeyboardButton("❌ Удалить аккаунт")],
         [KeyboardButton("🔙 Назад")]
     ]
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)

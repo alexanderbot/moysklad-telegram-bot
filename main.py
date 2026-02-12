@@ -148,13 +148,21 @@ def setup_handlers(application, db):
         ],
         states={
             REGISTRATION: [
-                MessageHandler(filters.CONTACT, auth.get_phone_number)
+                # Повторное нажатие "📱 Регистрация" перезапускает сценарий регистрации
+                MessageHandler(filters.Regex('^(📱 Регистрация)$'), auth.start_auth),
+                MessageHandler(filters.CONTACT, auth.get_phone_number),
+                MessageHandler(filters.Regex('^(❌ Отмена регистрации)$'), auth.cancel_registration),
             ],
             API_TOKEN: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, auth.get_api_token)
+                # Из шага ввода токена тоже можно перезапустить регистрацию
+                MessageHandler(filters.Regex('^(📱 Регистрация)$'), auth.start_auth),
+                MessageHandler(filters.Regex('^(❌ Отмена регистрации)$'), auth.cancel_registration),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, auth.get_api_token),
             ]
         },
-        fallbacks=[CommandHandler('cancel', auth.cancel_registration)]
+        fallbacks=[
+            CommandHandler('cancel', auth.cancel_registration)
+        ]
     )
 
     # ConversationHandler для обновления токена
@@ -179,6 +187,7 @@ def setup_handlers(application, db):
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CommandHandler("settings", auth.show_settings))
+    application.add_handler(CommandHandler("delete_me", auth.delete_account))
     application.add_handler(CommandHandler("notifications", notifications.notifications_command))
 
     # 3. Детальные отчеты
@@ -254,6 +263,9 @@ def setup_handlers(application, db):
     # 10. Настройки и помощь
     application.add_handler(MessageHandler(
         filters.Regex('^(⚙️ Настройки)$'), auth.show_settings
+    ))
+    application.add_handler(MessageHandler(
+        filters.Regex('^(❌ Удалить аккаунт)$'), auth.delete_account
     ))
     application.add_handler(MessageHandler(
         filters.Regex('^(ℹ️ Помощь)$'), help_command
