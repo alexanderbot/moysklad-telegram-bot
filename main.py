@@ -319,8 +319,10 @@ def main():
     except KeyboardInterrupt:
         logger.info("Received interrupt signal, shutting down...")
     finally:
-        # Останавливаем планировщик при завершении
-        scheduler.stop()
+        try:
+            scheduler.stop()
+        except RuntimeError:
+            logger.warning("Планировщик уже не может корректно остановиться: event loop закрыт")
         logger.info("Bot stopped")
 
 

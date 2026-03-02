@@ -6,12 +6,26 @@ from typing import List
 # Загружаем переменные окружения
 load_dotenv()
 
+# Базовая директория проекта (там, где лежит этот файл config.py)
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
 
 @dataclass
 class Config:
     """Конфигурация приложения"""
     BOT_TOKEN: str = os.getenv("BOT_TOKEN", "")
-    DB_PATH: str = os.getenv("DB_PATH", "data/bot_database.db")
+
+    # Папки для данных и логов - всегда внутри проекта
+    DATA_DIR: str = os.path.join(BASE_DIR, "data")
+    LOGS_DIR: str = os.path.join(BASE_DIR, "logs")
+
+    # Путь к БД: если в .env указан абсолютный путь - используем его как есть,
+    # если относительный или не указан - создаём/используем БД в папке проекта /data
+    DB_PATH: str = os.path.join(
+        BASE_DIR,
+        os.getenv("DB_PATH", os.path.join("data", "bot_database.db"))
+    ) if not os.path.isabs(os.getenv("DB_PATH", "")) else os.getenv("DB_PATH")
+
     ENCRYPTION_KEY: str = os.getenv("ENCRYPTION_KEY", "")
 
     # Настройки API МойСклад
@@ -22,10 +36,6 @@ class Config:
     ADMIN_IDS: List[int] = field(default_factory=lambda:
     list(map(int, os.getenv("ADMIN_IDS", "").split(","))) if os.getenv("ADMIN_IDS") else []
                                  )
-
-    # Папки для данных (относительно корня проекта)
-    DATA_DIR: str = "data"
-    LOGS_DIR: str = "logs"
 
     # Настройки планировщика
     SCHEDULER_TIMEZONE: str = 'Europe/Moscow'
