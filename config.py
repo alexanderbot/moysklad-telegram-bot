@@ -3,11 +3,11 @@ from dataclasses import dataclass, field
 from dotenv import load_dotenv
 from typing import List
 
-# Загружаем переменные окружения
-load_dotenv()
-
 # Базовая директория проекта (там, где лежит этот файл config.py)
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+# Загружаем переменные окружения из .env в корне проекта (независимо от текущей директории)
+load_dotenv(os.path.join(BASE_DIR, ".env"))
 
 
 @dataclass
@@ -36,6 +36,11 @@ class Config:
     ADMIN_IDS: List[int] = field(default_factory=lambda:
     list(map(int, os.getenv("ADMIN_IDS", "").split(","))) if os.getenv("ADMIN_IDS") else []
                                  )
+
+    # Подписка
+    SUBSCRIPTION_PAYMENT_URL: str = os.getenv("SUBSCRIPTION_PAYMENT_URL", "")
+    SUBSCRIPTION_PRICE_RUB: int = int(os.getenv("SUBSCRIPTION_PRICE_RUB", "199"))
+    TELEGRAM_PROVIDER_TOKEN: str = os.getenv("TELEGRAM_PROVIDER_TOKEN", "")
 
     # Настройки планировщика
     SCHEDULER_TIMEZONE: str = 'Europe/Moscow'

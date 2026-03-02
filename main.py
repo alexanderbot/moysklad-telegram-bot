@@ -1,6 +1,3 @@
-#!/usr/bin/env python
-# -*- coding: utf-8 -*-
-
 import logging
 import asyncio
 from telegram.ext import (
@@ -9,14 +6,16 @@ from telegram.ext import (
     MessageHandler,
     filters,
     ConversationHandler,
-    ContextTypes
+    ContextTypes,
+    CallbackQueryHandler,
+    PreCheckoutQueryHandler,
 )
 from telegram import Update
 from telegram.constants import ParseMode
 
 from config import config
 from database import init_database
-from handlers import AuthHandlers, MenuHandlers, NotificationHandlers, REGISTRATION, API_TOKEN
+from handlers import AuthHandlers, MenuHandlers, NotificationHandlers, PaymentHandlers, REGISTRATION, API_TOKEN
 from keyboards import get_main_menu
 from scheduler import StatisticsScheduler
 from moysklad_api import MoyskladAPI
@@ -138,6 +137,7 @@ def setup_handlers(application, db):
     auth = AuthHandlers(db)
     menu = MenuHandlers(db)
     notifications = NotificationHandlers(db)
+    payments = PaymentHandlers(db)
 
     # ===== 1. СОЗДАЕМ ВСЕ ConversationHandler =====
 
@@ -271,6 +271,21 @@ def setup_handlers(application, db):
         filters.Regex('^(ℹ️ Помощь)$'), help_command
     ))
 
+    # 12. Подписка
+    application.add_handler(MessageHandler(
+        filters.Regex('^(💳 Подписка|Подписка)$'), menu.show_subscription_menu
+    ))
+
+    # 12a. Платежи: callback «Оплатить в Telegram», PreCheckout, SuccessfulPayment
+    application.add_handler(CallbackQueryHandler(
+        payments.send_subscription_invoice,
+        pattern="^pay_subscription$"
+    ))
+    application.add_handler(PreCheckoutQueryHandler(payments.precheckout_callback))
+    application.add_handler(MessageHandler(
+        filters.SUCCESSFUL_PAYMENT, payments.successful_payment_callback
+    ))
+
     # 11. Управление уведомлениями (обработчики кнопок)
     application.add_handler(MessageHandler(
         filters.Regex('^(🔔 Включить уведомления|🔕 Выключить уведомления|◀️ Назад в меню)$'),
@@ -295,6 +310,12 @@ def main():
     # Инициализация базы данных
     db = init_database(config.DB_PATH)
     logger.info(f"Database initialized at {config.DB_PATH}")
+
+    # Проверка наличия токена для оплаты в Telegram
+    if config.TELEGRAM_PROVIDER_TOKEN:
+        logger.info("Оплата через Telegram: включена (TELEGRAM_PROVIDER_TOKEN задан)")
+    else:
+        logger.warning("Оплата через Telegram: отключена (TELEGRAM_PROVIDER_TOKEN не задан в .env)")
 
     # Создание приложения бота
     application = Application.builder().token(config.BOT_TOKEN).build()

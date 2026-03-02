@@ -12,7 +12,8 @@ def get_main_menu(is_registered: bool = False):
     if is_registered:
         keyboard = [
             [KeyboardButton("📊 Быстрый отчет"), KeyboardButton("📊 Детальные отчеты")],
-            [KeyboardButton("📈 Аналитика"), KeyboardButton("⚙️ Настройки")]
+            [KeyboardButton("📈 Аналитика"), KeyboardButton("⚙️ Настройки")],
+            [KeyboardButton("💳 Подписка")]
         ]
     else:
         keyboard = [
@@ -91,6 +92,14 @@ def get_detailed_period_keyboard(report_type: str = None):
         [KeyboardButton("🔙 Назад к отчетам")]
     ]
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+
+
+def get_subscription_payment_keyboard() -> InlineKeyboardMarkup:
+    """Инлайн-кнопка для оплаты подписки через Telegram (Invoice)"""
+    keyboard = [
+        [InlineKeyboardButton("💳 Оплатить в Telegram", callback_data="pay_subscription")]
+    ]
+    return InlineKeyboardMarkup(keyboard)
 
 
 def get_notifications_keyboard(enabled: bool) -> ReplyKeyboardMarkup:

@@ -43,9 +43,27 @@ class Database:
                     api_token_encrypted TEXT,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     last_active TIMESTAMP,
-                    is_active BOOLEAN DEFAULT 1
+                    is_active BOOLEAN DEFAULT 1,
+                    subscription_status TEXT DEFAULT 'none',
+                    trial_started_at TIMESTAMP,
+                    subscription_expires_at TIMESTAMP,
+                    last_subscription_notified_at DATE
                 )
             ''')
+
+            # На случай уже существующей таблицы — добавляем недостающие колонки безопасно
+            alter_statements = [
+                "ALTER TABLE users ADD COLUMN subscription_status TEXT DEFAULT 'none'",
+                "ALTER TABLE users ADD COLUMN trial_started_at TIMESTAMP",
+                "ALTER TABLE users ADD COLUMN subscription_expires_at TIMESTAMP",
+                "ALTER TABLE users ADD COLUMN last_subscription_notified_at DATE",
+            ]
+            for stmt in alter_statements:
+                try:
+                    cursor.execute(stmt)
+                except Exception:
+                    # Колонка уже есть или другая не критичная ошибка миграции — игнорируем
+                    pass
 
             # Таблица настроек пользователей
             cursor.execute('''
@@ -139,6 +157,112 @@ class Database:
                 INSERT INTO request_logs (user_id, request_type, period)
                 VALUES (?, ?, ?)
             ''', (user_id, request_type, period))
+
+    # ===== Методы подписки =====
+
+    def update_subscription(self,
+                            telegram_id: int,
+                            status: str,
+                            expires_at: datetime | None = None,
+                            trial_started_at: datetime | None = None) -> bool:
+        """
+        Обновление информации о подписке пользователя.
+
+        Args:
+            telegram_id: Telegram ID пользователя
+            status: Статус подписки (none|trial|active|expired)
+            expires_at: Дата окончания подписки/триала
+            trial_started_at: Дата начала триала
+        """
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+
+            fields = ["subscription_status = ?"]
+            values: list[Any] = [status]
+
+            if expires_at is not None:
+                fields.append("subscription_expires_at = ?")
+                values.append(expires_at)
+            if trial_started_at is not None:
+                fields.append("trial_started_at = ?")
+                values.append(trial_started_at)
+
+            # всегда обновляем last_active при изменении подписки
+            fields.append("last_active = ?")
+            values.append(datetime.now())
+
+            values.append(telegram_id)
+
+            query = f'''
+                UPDATE users
+                SET {", ".join(fields)}
+                WHERE telegram_id = ?
+            '''
+            cursor.execute(query, tuple(values))
+            updated = cursor.rowcount > 0
+            if updated:
+                logger.info(f"Subscription updated for user {telegram_id}: status={status}")
+            else:
+                logger.warning(f"Attempt to update subscription for non-existing user {telegram_id}")
+            return updated
+
+    def set_subscription_status(self, telegram_id: int, status: str) -> bool:
+        """Обновление только статуса подписки (без изменения дат)."""
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                '''
+                UPDATE users
+                SET subscription_status = ?, last_active = ?
+                WHERE telegram_id = ?
+                ''',
+                (status, datetime.now(), telegram_id)
+            )
+            updated = cursor.rowcount > 0
+            if updated:
+                logger.info(f"Subscription status set to {status} for user {telegram_id}")
+            return updated
+
+    def get_all_users_for_subscription_check(self) -> list[Dict[str, Any]]:
+        """
+        Получить список пользователей для проверки подписки.
+
+        Возвращает минимальный набор полей, необходимых для напоминаний.
+        """
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                '''
+                SELECT telegram_id,
+                       subscription_status,
+                       trial_started_at,
+                       subscription_expires_at,
+                       last_subscription_notified_at
+                FROM users
+                WHERE is_active = 1
+                '''
+            )
+            rows = cursor.fetchall()
+            return [dict(row) for row in rows]
+
+    def update_subscription_notification_date(self, telegram_id: int, notify_date: datetime.date) -> bool:
+        """
+        Обновить дату последнего уведомления по подписке.
+        """
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                '''
+                UPDATE users
+                SET last_subscription_notified_at = ?
+                WHERE telegram_id = ?
+                ''',
+                (notify_date, telegram_id)
+            )
+            updated = cursor.rowcount > 0
+            if updated:
+                logger.info(f"Updated last_subscription_notified_at for user {telegram_id} to {notify_date}")
+            return updated
 
     def update_last_active(self, telegram_id: int):
         """Обновление времени последней активности"""

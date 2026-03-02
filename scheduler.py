@@ -11,6 +11,8 @@ from telegram.constants import ParseMode
 from database import Database
 from moysklad_api import MoyskladAPI, get_period_dates
 from security import security
+from subscription import check_subscription, compute_days_left, is_superadmin
+from config import config
 
 logger = logging.getLogger(__name__)
 
@@ -67,6 +69,16 @@ class StatisticsScheduler:
             replace_existing=True
         )
         logger.info("✅ Настроена месячная статистика (1 число 9:00)")
+
+        # Ежедневная проверка подписок и напоминаний в 9:10
+        self.scheduler.add_job(
+            self._check_subscriptions_and_notify,
+            CronTrigger(hour=9, minute=10, timezone='Europe/Moscow'),
+            id='subscription_reminders',
+            name='Напоминания о подписке',
+            replace_existing=True
+        )
+        logger.info("✅ Настроены напоминания о подписке (ежедневно 9:10)")
         
         # Запускаем планировщик
         self.scheduler.start()
@@ -152,6 +164,14 @@ class StatisticsScheduler:
             
             for user_id, encrypted_token in users:
                 try:
+                    # Проверяем подписку: автоотчеты только для активной/триальной подписки или суперадмина
+                    sub = check_subscription(self.db, user_id)
+                    if not sub.get("is_superadmin") and (not sub.get("ok") or sub.get("mode") != "full"):
+                        logger.info(
+                            f"Пропускаем автоотчет для пользователя {user_id}: "
+                            f"status={sub.get('status')}, mode={sub.get('mode')}"
+                        )
+                        continue
                     # Расшифровываем токен
                     api_token = security.decrypt(encrypted_token)
                     
@@ -216,6 +236,98 @@ class StatisticsScheduler:
             
         except Exception as e:
             logger.error(f"❌ Критическая ошибка при отправке отчетов: {e}", exc_info=True)
+
+    async def _check_subscriptions_and_notify(self):
+        """
+        Ежедневная проверка подписок и отправка напоминаний:
+        - за 3, 2, 1 день до окончания
+        - в день окончания
+        - уведомление о начале льготного периода (2 дня только с быстрыми отчетами)
+        """
+        logger.info("🔍 Проверка подписок для напоминаний...")
+        try:
+            users = self.db.get_all_users_for_subscription_check()
+            if not users:
+                logger.info("Нет пользователей для проверки подписки")
+                return
+
+            today = datetime.now().date()
+
+            for row in users:
+                telegram_id = row.get("telegram_id")
+
+                if not telegram_id:
+                    continue
+
+                # Суперадминов не трогаем
+                if is_superadmin(telegram_id):
+                    continue
+
+                status = (row.get("subscription_status") or "none").lower()
+                expires_at = row.get("subscription_expires_at")
+
+                days_left = compute_days_left(expires_at, today=today)
+                if days_left is None:
+                    continue
+
+                last_notified_raw = row.get("last_subscription_notified_at")
+                try:
+                    last_notified = (
+                        datetime.fromisoformat(str(last_notified_raw)).date()
+                        if last_notified_raw else None
+                    )
+                except Exception:
+                    last_notified = None
+
+                # Чтобы не слать несколько уведомлений в один день
+                if last_notified == today:
+                    continue
+
+                message: str | None = None
+
+                if days_left in (3, 2, 1):
+                    message = (
+                        "⏰ *Напоминание о подписке*\n\n"
+                        f"Через *{days_left}* дн. ваша подписка на бота МойСклад закончится.\n"
+                        f"Чтобы и дальше пользоваться всеми отчетами и аналитикой, "
+                        f"оформите продление за {config.SUBSCRIPTION_PRICE_RUB}₽/мес "
+                        "через кнопку *\"💳 Подписка\"* в главном меню."
+                    )
+                elif days_left == 0:
+                    message = (
+                        "⏰ *Напоминание о подписке*\n\n"
+                        "Ваша подписка на бота МойСклад заканчивается *сегодня*.\n"
+                        f"Без продления доступ к детальным отчетам и аналитике будет ограничен.\n"
+                        f"Стоимость продления: {config.SUBSCRIPTION_PRICE_RUB}₽/мес.\n"
+                        "Управление подпиской: кнопка *\"💳 Подписка\"* в главном меню."
+                    )
+                elif days_left in (-2, -1):
+                    # Начало/ход льготного периода: 2 дня только с быстрыми отчетами
+                    remaining = 2 + days_left  # -2 -> 0, -1 -> 1
+                    message = (
+                        "⚠️ *Подписка завершилась*\n\n"
+                        "Основной период подписки закончился, сейчас действует льготный период *2 дня*.\n"
+                        "В это время доступны только *\"Быстрые отчеты\"*.\n"
+                        f"Осталось дней льготного периода: *{remaining}*.\n\n"
+                        f"Чтобы вернуться к полному функционалу, оформите подписку за "
+                        f"{config.SUBSCRIPTION_PRICE_RUB}₽/мес через кнопку *\"💳 Подписка\"* в главном меню."
+                    )
+
+                if message:
+                    try:
+                        await self.application.bot.send_message(
+                            chat_id=telegram_id,
+                            text=message,
+                            parse_mode=ParseMode.MARKDOWN
+                        )
+                        self.db.update_subscription_notification_date(telegram_id, today)
+                        logger.info(f"Отправлено уведомление о подписке пользователю {telegram_id}, days_left={days_left}")
+                        await asyncio.sleep(0.1)
+                    except Exception as e:
+                        logger.error(f"Ошибка отправки напоминания о подписке пользователю {telegram_id}: {e}")
+
+        except Exception as e:
+            logger.error(f"Критическая ошибка при проверке подписок: {e}", exc_info=True)
 
     def _format_scheduled_report(self, report, period_name: str, report_title: str) -> str:
         """

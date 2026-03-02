@@ -19,70 +19,70 @@ class SecurityManager:
 
     def __init__(self, encryption_key: str = None):
         self.encryption_key = encryption_key or config.ENCRYPTION_KEY
-        print(f"🔐 Инициализация SecurityManager с ключом: {self.encryption_key[:20]}...")
+        print(f"[SECURITY] Initialization with key: {self.encryption_key[:20]}...")
         self.fernet = self._init_fernet()
 
     def _init_fernet(self):
         """Инициализация Fernet с ключом"""
         try:
-            print(f"🔑 Попытка инициализации Fernet с ключом длиной {len(self.encryption_key)}")
+            print(f"[SECURITY] Initializing Fernet with key length {len(self.encryption_key)}")
 
             # Проверяем, является ли ключ валидным Fernet ключом
             if not self.encryption_key:
-                print("❌ Ключ шифрования отсутствует")
+                print("[ERROR] Encryption key is missing")
                 return self._generate_new_key()
 
             if len(self.encryption_key) != 44:
-                print(f"⚠️  Ключ имеет неверную длину: {len(self.encryption_key)} (должно быть 44)")
+                print(f"[WARNING] Invalid key length: {len(self.encryption_key)} (should be 44)")
                 return self._generate_new_key()
 
             # Декодируем ключ из base64
             try:
                 key = base64.urlsafe_b64decode(self.encryption_key)
-                print(f"✅ Ключ успешно декодирован из base64, длина: {len(key)} байт")
+                print(f"[SUCCESS] Key decoded from base64, length: {len(key)} bytes")
 
                 if len(key) != 32:
-                    print(f"❌ Декодированный ключ не 32 байта: {len(key)}")
+                    print(f"[ERROR] Decoded key is not 32 bytes: {len(key)}")
                     return self._generate_new_key()
 
                 fernet = Fernet(self.encryption_key.encode())
-                print("✅ Fernet успешно инициализирован")
+                print("[SUCCESS] Fernet initialized successfully")
                 return fernet
 
             except Exception as decode_error:
-                print(f"❌ Ошибка декодирования ключа: {decode_error}")
+                print(f"[ERROR] Key decoding failed: {decode_error}")
                 return self._generate_new_key()
 
         except Exception as e:
-            print(f"❌ Ошибка инициализации шифрования: {e}")
+            print(f"[ERROR] Encryption initialization failed: {e}")
             return self._generate_new_key()
 
     def _generate_new_key(self):
         """Генерация нового ключа шифрования"""
-        print("🔐 Генерация нового ключа шифрования...")
+        print("[SECURITY] Generating new encryption key...")
         key = Fernet.generate_key()
         self.encryption_key = key.decode()
 
-        print(f"📋 Новый ключ (сохраните в .env):")
+        print(f"[INFO] New key (save to .env):")
         print(f"ENCRYPTION_KEY={self.encryption_key}")
 
         return Fernet(key)
 
     def encrypt(self, data: str) -> str:
         """Шифрование данных"""
-        print(f"🔒 Шифрование данных длиной {len(data)}")
+        print(f"[ENCRYPT] Encrypting data of length {len(data)}")
         try:
             if not data:
-                print("⚠️  Пустые данные для шифрования")
+                print("[WARNING] Empty data for encryption")
                 return ""
 
             encrypted = self.fernet.encrypt(data.encode())
             result = encrypted.decode()
-            print(f"✅ Данные успешно зашифрованы, результат: {result[:50]}...")
+            print(f"[SUCCESS] Data encrypted, result: {result[:50]}...")
             return result
 
         except Exception as e:
-            print(f"❌ Ошибка шифрования: {e}")
+            print(f"[ERROR] Encryption failed: {e}")
             return data
 
     def decrypt(self, encrypted_data: str) -> str:
@@ -90,17 +90,17 @@ class SecurityManager:
 
         try:
             if not encrypted_data:
-                print("⚠️  Пустые данные для дешифрования")
+                print("[WARNING] Empty data for decryption")
                 return ""
 
             decrypted = self.fernet.decrypt(encrypted_data.encode())
             result = decrypted.decode()
-            print(f"✅ Данные успешно расшифрованы, результат: {result[:50]}...")
+            print(f"[SUCCESS] Data decrypted, result: {result[:50]}...")
             return result
 
         except Exception as e:
-            print(f"❌ Ошибка расшифровки: {e}")
-            print(f"   Тип ошибки: {type(e).__name__}")
+            print(f"[ERROR] Decryption failed: {e}")
+            print(f"   Error type: {type(e).__name__}")
             return ""
 
     def hash_phone(self, phone_number: str) -> str:

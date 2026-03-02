@@ -1,10 +1,10 @@
 import logging
-from telegram import Update, ReplyKeyboardRemove
-from telegram.ext import ContextTypes, ConversationHandler, MessageHandler, filters, CommandHandler
+from telegram import Update, ReplyKeyboardRemove, LabeledPrice
+from telegram.ext import ContextTypes, ConversationHandler, MessageHandler, filters, CommandHandler, CallbackQueryHandler, PreCheckoutQueryHandler
 from telegram.constants import ParseMode
 
 from moysklad_api import MoyskladAPI, get_period_dates, AnalyticsCalculator
-from datetime import datetime
+from datetime import datetime, timedelta
 from database import Database
 from security import security
 from keyboards import (
@@ -16,8 +16,11 @@ from keyboards import (
     get_analytics_keyboard,
     get_detailed_reports_keyboard,
     get_detailed_period_keyboard,
-    get_notifications_keyboard
+    get_notifications_keyboard,
+    get_subscription_payment_keyboard,
 )
+from subscription import check_subscription, is_superadmin
+from config import config
 
 logger = logging.getLogger(__name__)
 
@@ -183,15 +186,46 @@ class AuthHandlers:
                 # Обновляем время активности
                 self.db.update_last_active(user.id)
 
+                # Если у пользователя еще не настроена подписка — запускаем триал
+                try:
+                    db_user = self.db.get_user(user.id)
+                    sub_status = (db_user.get('subscription_status') or 'none').lower() if db_user else 'none'
+                    if sub_status == 'none':
+                        now = datetime.now()
+                        trial_end = now.replace(microsecond=0) + timedelta(days=30)
+                        self.db.update_subscription(
+                            telegram_id=user.id,
+                            status='trial',
+                            expires_at=trial_end,
+                            trial_started_at=now.replace(microsecond=0)
+                        )
+                        logger.info(f"Trial subscription started for user {user.id} until {trial_end}")
+                except Exception as e:
+                    logger.error(f"Ошибка при установке триальной подписки для пользователя {user.id}: {e}")
+
                 phone = context.user_data.get('phone', 'не указан')
+
+                trial_info = ""
+                try:
+                    db_user = self.db.get_user(user.id)
+                    if db_user and db_user.get("subscription_expires_at"):
+                        trial_info = (
+                            f"\n\n🆓 *Пробный период:* 1 месяц бесплатно до "
+                            f"`{db_user['subscription_expires_at']}`\n"
+                            f"После этого стоимость подписки составит {config.SUBSCRIPTION_PRICE_RUB}₽ в месяц.\n"
+                            f"Управление подпиской: кнопка *\"💳 Подписка\"* в главном меню."
+                        )
+                except Exception:
+                    pass
 
                 await update.message.reply_text(
                     "🎉 *Регистрация успешно завершена!*\n\n"
                     f"📱 *Телефон:* `{phone}`\n"
                     "🔐 *Токен:* ✅ Сохранен в зашифрованном виде\n\n"
-                    "✅ Теперь вы можете получать статистику из МойСклад\n"
+                    "✅ Теперь вы можете получать статистику из МойСклад"
+                    f"{trial_info}\n\n"
                     "Используйте меню для работы с отчетами:",
-                    reply_markup=get_main_menu(True),  # ✅ Исправлено
+                    reply_markup=get_main_menu(True),
                     parse_mode=ParseMode.MARKDOWN
                 )
             else:
@@ -372,6 +406,88 @@ class MenuHandlers:
             parse_mode=ParseMode.MARKDOWN
         )
 
+    async def show_subscription_menu(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Показать информацию о подписке и ссылку на оплату"""
+        user = update.effective_user
+        user_data = self.db.get_user(user.id)
+
+        if not user_data or not user_data.get('api_token_encrypted'):
+            await update.message.reply_text(
+                "❌ Вы еще не зарегистрированы. Сначала пройдите регистрацию через /start.",
+                reply_markup=get_main_menu(False)
+            )
+            return
+
+        sub = check_subscription(self.db, user.id)
+
+        if sub.get("is_superadmin"):
+            text = (
+                "👑 *Суперадмин*\n\n"
+                "Вы являетесь суперадмином, для вас все функции бота всегда доступны, "
+                "подписка считается постоянно активной."
+            )
+            await update.message.reply_text(
+                text,
+                reply_markup=get_main_menu(True),
+                parse_mode=ParseMode.MARKDOWN
+            )
+            return
+
+        status = sub.get("status")
+        days_left = sub.get("days_left")
+
+        base = "💳 *Подписка на бота МойСклад*\n\n"
+
+        if status in ("trial", "active") and sub.get("mode") == "full":
+            status_line = "✅ Подписка активна.\n"
+            if days_left is not None:
+                status_line += f"Осталось дней до окончания: *{days_left}*.\n"
+        elif sub.get("mode") == "limited":
+            status_line = (
+                "⚠️ Основной период подписки завершён, сейчас действует льготный период 2 дня.\n"
+                "Доступны только *\"Быстрые отчеты\"*.\n"
+            )
+        elif status == "expired":
+            status_line = (
+                "❌ Подписка полностью закончилась.\n"
+                "Доступны только *\"Быстрые отчеты\"*.\n"
+            )
+        elif status == "no_registration":
+            status_line = (
+                "❌ Вы пока не зарегистрированы.\n"
+                "Сначала пройдите регистрацию через /start."
+            )
+        else:
+            status_line = "ℹ️ Подписка пока не активирована.\n"
+
+        payment_part = ""
+        reply_markup = get_main_menu(True)
+        if config.TELEGRAM_PROVIDER_TOKEN:
+            payment_part = (
+                f"\n\nСтоимость подписки: *{config.SUBSCRIPTION_PRICE_RUB}₽/месяц*.\n"
+                "Нажмите кнопку ниже, чтобы оплатить прямо в Telegram.\n"
+                "_После успешной оплаты подписка будет активирована автоматически._"
+            )
+            reply_markup = get_subscription_payment_keyboard()
+        elif config.SUBSCRIPTION_PAYMENT_URL:
+            payment_part = (
+                f"\n\nСтоимость подписки: *{config.SUBSCRIPTION_PRICE_RUB}₽/месяц*.\n"
+                f"Для оформления или продления перейдите по ссылке оплаты:\n"
+                f"{config.SUBSCRIPTION_PAYMENT_URL}\n\n"
+                "_После успешной оплаты подписка будет активирована автоматически через ЮKassa._"
+            )
+        else:
+            payment_part = (
+                f"\n\nСтоимость подписки: *{config.SUBSCRIPTION_PRICE_RUB}₽/месяц*.\n"
+                "Ссылка оплаты пока не настроена. Обратитесь к администратору."
+            )
+
+        await update.message.reply_text(
+            base + status_line + payment_part,
+            reply_markup=reply_markup,
+            parse_mode=ParseMode.MARKDOWN
+        )
+
     async def show_reports_menu(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Показать меню отчетов"""
         user = update.effective_user
@@ -385,6 +501,29 @@ class MenuHandlers:
                 reply_markup=get_main_menu(False)  # ✅ ПРАВИЛЬНО
             )
             return
+
+        # Проверка подписки (доступ только с активной или триальной подпиской)
+        sub = check_subscription(self.db, user.id)
+        if not sub.get("is_superadmin"):
+            if not sub.get("ok"):
+                await update.message.reply_text(
+                    "❌ Ваша подписка закончилась.\n\n"
+                    f"Для доступа ко всем отчетам оформите подписку за {config.SUBSCRIPTION_PRICE_RUB}₽/мес "
+                    "через кнопку *\"💳 Подписка\"* в главном меню.",
+                    reply_markup=get_main_menu(True),
+                    parse_mode=ParseMode.MARKDOWN
+                )
+                return
+            if sub.get("mode") == "limited":
+                await update.message.reply_text(
+                    "ℹ️ Ваша подписка завершилась, сейчас действует льготный период 2 дня.\n\n"
+                    "В это время доступны только *\"Быстрые отчеты\"*.\n"
+                    f"Для полного доступа оформите подписку за {config.SUBSCRIPTION_PRICE_RUB}₽/мес "
+                    "через кнопку *\"💳 Подписка\"* в главном меню.",
+                    reply_markup=get_main_menu(True),
+                    parse_mode=ParseMode.MARKDOWN
+                )
+                return
 
         await update.message.reply_text(
             "📊 *Отчеты*\n\n"
@@ -406,6 +545,28 @@ class MenuHandlers:
                 reply_markup=get_main_menu(False)  # ✅ ПРАВИЛЬНО
             )
             return
+
+        # Аналитика доступна только при активной подписке
+        sub = check_subscription(self.db, user.id)
+        if not sub.get("is_superadmin"):
+            if not sub.get("ok"):
+                await update.message.reply_text(
+                    "❌ Ваша подписка закончилась.\n\n"
+                    f"Аналитика доступна только при активной подписке {config.SUBSCRIPTION_PRICE_RUB}₽/мес.\n"
+                    "Оформите или продлите подписку через кнопку *\"💳 Подписка\"* в главном меню.",
+                    reply_markup=get_main_menu(True),
+                    parse_mode=ParseMode.MARKDOWN
+                )
+                return
+            if sub.get("mode") == "limited":
+                await update.message.reply_text(
+                    "ℹ️ Ваша подписка завершилась, сейчас действует льготный период 2 дня.\n\n"
+                    "В это время доступны только *\"Быстрые отчеты\"*.\n"
+                    f"Аналитика будет снова доступна после оплаты подписки {config.SUBSCRIPTION_PRICE_RUB}₽/мес.",
+                    reply_markup=get_main_menu(True),
+                    parse_mode=ParseMode.MARKDOWN
+                )
+                return
 
         await update.message.reply_text(
             "📈 *Аналитика*\n\n"
@@ -673,6 +834,28 @@ class MenuHandlers:
             )
             return
 
+        # Детализированные отчеты доступны только при активной подписке
+        sub = check_subscription(self.db, user.id)
+        if not sub.get("is_superadmin"):
+            if not sub.get("ok"):
+                await update.message.reply_text(
+                    "❌ Ваша подписка закончилась.\n\n"
+                    f"Детализированные отчеты доступны только при активной подписке {config.SUBSCRIPTION_PRICE_RUB}₽/мес.\n"
+                    "Оформите или продлите подписку через кнопку *\"💳 Подписка\"* в главном меню.",
+                    reply_markup=get_main_menu(True),
+                    parse_mode=ParseMode.MARKDOWN
+                )
+                return
+            if sub.get("mode") == "limited":
+                await update.message.reply_text(
+                    "ℹ️ Ваша подписка завершилась, сейчас действует льготный период 2 дня.\n\n"
+                    "В это время доступны только *\"Быстрые отчеты\"*.\n"
+                    f"Детализированные отчеты будут снова доступны после оплаты подписки {config.SUBSCRIPTION_PRICE_RUB}₽/мес.",
+                    reply_markup=get_main_menu(True),
+                    parse_mode=ParseMode.MARKDOWN
+                )
+                return
+
         await update.message.reply_text(
             "📊 *Детализированные отчеты*\n\n"
             "Выберите тип отчета:",
@@ -691,6 +874,26 @@ class MenuHandlers:
                 reply_markup=get_main_menu(False)
             )
             return
+
+        sub = check_subscription(self.db, user.id)
+        if not sub.get("is_superadmin"):
+            if not sub.get("ok"):
+                await update.message.reply_text(
+                    "❌ Ваша подписка закончилась.\n\n"
+                    f"Детализированные отчеты по розничным продажам доступны только при активной подписке "
+                    f"{config.SUBSCRIPTION_PRICE_RUB}₽/мес.",
+                    reply_markup=get_main_menu(True),
+                    parse_mode=ParseMode.MARKDOWN
+                )
+                return
+            if sub.get("mode") == "limited":
+                await update.message.reply_text(
+                    "ℹ️ Ваша подписка завершилась, сейчас действует льготный период 2 дня.\n\n"
+                    "Доступны только *\"Быстрые отчеты\"*.",
+                    reply_markup=get_main_menu(True),
+                    parse_mode=ParseMode.MARKDOWN
+                )
+                return
 
         # ✅ Сохраняем тип отчета в контексте
         context.user_data['current_report_type'] = 'retail_sales'
@@ -718,6 +921,25 @@ class MenuHandlers:
             )
             return
 
+        sub = check_subscription(self.db, user.id)
+        if not sub.get("is_superadmin"):
+            if not sub.get("ok"):
+                await update.message.reply_text(
+                    "❌ Ваша подписка закончилась.\n\n"
+                    f"Отчеты по отгрузкам доступны только при активной подписке {config.SUBSCRIPTION_PRICE_RUB}₽/мес.",
+                    reply_markup=get_main_menu(True),
+                    parse_mode=ParseMode.MARKDOWN
+                )
+                return
+            if sub.get("mode") == "limited":
+                await update.message.reply_text(
+                    "ℹ️ Ваша подписка завершилась, сейчас действует льготный период 2 дня.\n\n"
+                    "Доступны только *\"Быстрые отчеты\"*.",
+                    reply_markup=get_main_menu(True),
+                    parse_mode=ParseMode.MARKDOWN
+                )
+                return
+
         context.user_data['current_report_type'] = 'demand'
         logger.info(f"✅ Установлен тип отчета: demand для пользователя {user.id}")
 
@@ -740,6 +962,26 @@ class MenuHandlers:
                 reply_markup=get_main_menu(False)
             )
             return
+
+        sub = check_subscription(self.db, user.id)
+        if not sub.get("is_superadmin"):
+            if not sub.get("ok"):
+                await update.message.reply_text(
+                    "❌ Ваша подписка закончилась.\n\n"
+                    f"Отчеты по заказам покупателей доступны только при активной подписке "
+                    f"{config.SUBSCRIPTION_PRICE_RUB}₽/мес.",
+                    reply_markup=get_main_menu(True),
+                    parse_mode=ParseMode.MARKDOWN
+                )
+                return
+            if sub.get("mode") == "limited":
+                await update.message.reply_text(
+                    "ℹ️ Ваша подписка завершилась, сейчас действует льготный период 2 дня.\n\n"
+                    "Доступны только *\"Быстрые отчеты\"*.",
+                    reply_markup=get_main_menu(True),
+                    parse_mode=ParseMode.MARKDOWN
+                )
+                return
 
         # ✅ Сохраняем тип отчета в контексте
         context.user_data['current_report_type'] = 'customer_orders'
@@ -765,6 +1007,25 @@ class MenuHandlers:
             )
             return
 
+        sub = check_subscription(self.db, user.id)
+        if not sub.get("is_superadmin"):
+            if not sub.get("ok"):
+                await update.message.reply_text(
+                    "❌ Ваша подписка закончилась.\n\n"
+                    f"Объединенный отчет доступен только при активной подписке {config.SUBSCRIPTION_PRICE_RUB}₽/мес.",
+                    reply_markup=get_main_menu(True),
+                    parse_mode=ParseMode.MARKDOWN
+                )
+                return
+            if sub.get("mode") == "limited":
+                await update.message.reply_text(
+                    "ℹ️ Ваша подписка завершилась, сейчас действует льготный период 2 дня.\n\n"
+                    "Доступны только *\"Быстрые отчеты\"*.",
+                    reply_markup=get_main_menu(True),
+                    parse_mode=ParseMode.MARKDOWN
+                )
+                return
+
         # ✅ Сохраняем тип отчета в контексте
         context.user_data['current_report_type'] = 'combined_report'
         logger.info(f"✅ Установлен тип отчета: combined_report для пользователя {user.id}")
@@ -787,6 +1048,26 @@ class MenuHandlers:
                 reply_markup=get_main_menu(False)
             )
             return
+
+        sub = check_subscription(self.db, user.id)
+        if not sub.get("is_superadmin"):
+            if not sub.get("ok"):
+                await update.message.reply_text(
+                    "❌ Ваша подписка закончилась.\n\n"
+                    f"Отчет по топ-20 товаров доступен только при активной подписке "
+                    f"{config.SUBSCRIPTION_PRICE_RUB}₽/мес.",
+                    reply_markup=get_main_menu(True),
+                    parse_mode=ParseMode.MARKDOWN
+                )
+                return
+            if sub.get("mode") == "limited":
+                await update.message.reply_text(
+                    "ℹ️ Ваша подписка завершилась, сейчас действует льготный период 2 дня.\n\n"
+                    "Доступны только *\"Быстрые отчеты\"*.",
+                    reply_markup=get_main_menu(True),
+                    parse_mode=ParseMode.MARKDOWN
+                )
+                return
 
         encrypted_token = user_data['api_token_encrypted']
         api_token = security.decrypt(encrypted_token)
@@ -1366,8 +1647,18 @@ class MenuHandlers:
                 # Форматируем и отправляем отчет
                 report_text = quick_report.format_quick_report()
 
+                sub = check_subscription(self.db, user.id)
+                extra_note = ""
+                if not sub.get("is_superadmin"):
+                    if not sub.get("ok") or sub.get("mode") == "limited":
+                        extra_note = (
+                            "\n\nℹ️ Доступ к детализированным отчетам и аналитике ограничен из-за статуса подписки.\n"
+                            f"Оформите подписку за {config.SUBSCRIPTION_PRICE_RUB}₽/мес через кнопку "
+                            "*\"💳 Подписка\"* в главном меню."
+                        )
+
                 await update.message.reply_text(
-                    report_text,
+                    report_text + extra_note,
                     parse_mode=ParseMode.MARKDOWN,
                     reply_markup=get_main_menu(True)
                 )
@@ -1525,3 +1816,134 @@ class NotificationHandlers:
                 reply_markup=get_main_menu(is_registered),
                 parse_mode=ParseMode.MARKDOWN
             )
+
+
+class PaymentHandlers:
+    """Обработчики платежей через Telegram (Invoice + ЮKassa)"""
+
+    def __init__(self, db: Database):
+        self.db = db
+
+    async def send_subscription_invoice(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Отправка счёта на оплату подписки (callback от кнопки «Оплатить в Telegram»)"""
+        query = update.callback_query
+        await query.answer()
+
+        user = update.effective_user
+        logger.info(f"💳 Запрос на создание счета от пользователя {user.id}")
+
+        if not config.TELEGRAM_PROVIDER_TOKEN:
+            logger.warning("❌ TELEGRAM_PROVIDER_TOKEN не настроен")
+            await query.message.reply_text(
+                "❌ Оплата через Telegram временно недоступна. Обратитесь к администратору."
+            )
+            return
+
+        user_data = self.db.get_user(user.id)
+        if not user_data or not user_data.get('api_token_encrypted'):
+            logger.warning(f"❌ Пользователь {user.id} не зарегистрирован")
+            await query.message.reply_text(
+                "❌ Сначала необходимо зарегистрироваться через /start."
+            )
+            return
+
+        if is_superadmin(user.id):
+            logger.info(f"👑 Пользователь {user.id} является суперадмином")
+            await query.message.reply_text(
+                "👑 Вы суперадмин — подписка для вас всегда активна, оплата не требуется."
+            )
+            return
+
+        amount_kopecks = config.SUBSCRIPTION_PRICE_RUB * 100
+        prices = [LabeledPrice(label="Подписка на 1 месяц", amount=amount_kopecks)]
+
+        logger.info(f"💰 Создание счета: {config.SUBSCRIPTION_PRICE_RUB} ₽ ({amount_kopecks} копеек)")
+        logger.info(f"🔑 Токен провайдера: {config.TELEGRAM_PROVIDER_TOKEN[:20]}...")
+
+        try:
+            invoice = await context.bot.send_invoice(
+                chat_id=user.id,
+                title="Подписка на бота МойСклад",
+                description=f"Подписка на 1 месяц — доступ ко всем отчётам и аналитике",
+                payload=f"subscription_{user.id}",
+                provider_token=config.TELEGRAM_PROVIDER_TOKEN,
+                currency="RUB",
+                prices=prices,
+                need_name=False,
+                need_phone_number=False,
+                need_email=False,
+                need_shipping_address=False,
+                is_flexible=False,
+                start_parameter="subscription",
+            )
+            logger.info(f"✅ Счёт успешно отправлен пользователю {user.id}, message_id={invoice.message_id}")
+        except Exception as e:
+            logger.error(f"❌ Ошибка отправки счёта пользователю {user.id}: {e}", exc_info=True)
+            await query.message.reply_text(
+                f"❌ Не удалось создать платёж.\n\n"
+                f"Ошибка: {str(e)}\n\n"
+                f"Попробуйте позже или обратитесь к администратору."
+            )
+
+    async def precheckout_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Подтверждение платежа перед списанием (PreCheckoutQuery)"""
+        query = update.pre_checkout_query
+        payload = query.invoice_payload or ""
+
+        if not payload.startswith("subscription_"):
+            await query.answer(ok=False, error_message="Неизвестный тип платежа.")
+            return
+
+        await query.answer(ok=True)
+
+    async def successful_payment_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Обработка успешной оплаты — продление подписки на 30 дней"""
+        user = update.effective_user
+        payment = update.message.successful_payment
+
+        payload = payment.invoice_payload or ""
+        if not payload.startswith("subscription_"):
+            logger.warning(f"Неожиданный payload платежа: {payload}")
+            return
+
+        telegram_id = user.id
+
+        user_data = self.db.get_user(telegram_id)
+        if not user_data:
+            logger.warning(f"Оплата от неизвестного пользователя {telegram_id}")
+            await update.message.reply_text("❌ Пользователь не найден в базе. Обратитесь к администратору.")
+            return
+
+        now = datetime.now().replace(microsecond=0)
+        expires_raw = user_data.get("subscription_expires_at")
+
+        if expires_raw:
+            try:
+                if isinstance(expires_raw, datetime):
+                    expires_at = expires_raw
+                else:
+                    expires_at = datetime.fromisoformat(str(expires_raw).replace("Z", "+00:00"))
+                if expires_at.date() >= now.date():
+                    new_expires = expires_at + timedelta(days=30)
+                else:
+                    new_expires = now + timedelta(days=30)
+            except Exception:
+                new_expires = now + timedelta(days=30)
+        else:
+            new_expires = now + timedelta(days=30)
+
+        self.db.update_subscription(
+            telegram_id=telegram_id,
+            status="active",
+            expires_at=new_expires,
+        )
+
+        logger.info(f"Подписка продлена для пользователя {telegram_id} до {new_expires}")
+
+        await update.message.reply_text(
+            "✅ *Оплата получена!*\n\n"
+            "Подписка активирована на 30 дней.\n"
+            "Теперь вам доступны все отчёты и аналитика.",
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=get_main_menu(True)
+        )
