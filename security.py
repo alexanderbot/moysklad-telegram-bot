@@ -1,15 +1,16 @@
 import base64
+import logging
 from cryptography.fernet import Fernet
 import os
+
+logger = logging.getLogger(__name__)
 
 # Импортируем конфигурацию
 try:
     from config import config
 except ImportError:
-    # Создаем минимальную конфигурацию, если config.py не найден
     class SimpleConfig:
         ENCRYPTION_KEY = os.getenv("ENCRYPTION_KEY", "")
-
 
     config = SimpleConfig()
 
@@ -19,96 +20,76 @@ class SecurityManager:
 
     def __init__(self, encryption_key: str = None):
         self.encryption_key = encryption_key or config.ENCRYPTION_KEY
-        print(f"[SECURITY] Initialization with key: {self.encryption_key[:20]}...")
+        logger.info("SecurityManager: initializing...")
         self.fernet = self._init_fernet()
 
     def _init_fernet(self):
         """Инициализация Fernet с ключом"""
         try:
-            print(f"[SECURITY] Initializing Fernet with key length {len(self.encryption_key)}")
-
-            # Проверяем, является ли ключ валидным Fernet ключом
             if not self.encryption_key:
-                print("[ERROR] Encryption key is missing")
+                logger.error("Encryption key is missing")
                 return self._generate_new_key()
 
             if len(self.encryption_key) != 44:
-                print(f"[WARNING] Invalid key length: {len(self.encryption_key)} (should be 44)")
+                logger.warning("Invalid encryption key length: %d (expected 44)", len(self.encryption_key))
                 return self._generate_new_key()
 
-            # Декодируем ключ из base64
             try:
                 key = base64.urlsafe_b64decode(self.encryption_key)
-                print(f"[SUCCESS] Key decoded from base64, length: {len(key)} bytes")
 
                 if len(key) != 32:
-                    print(f"[ERROR] Decoded key is not 32 bytes: {len(key)}")
+                    logger.error("Decoded key is not 32 bytes: %d", len(key))
                     return self._generate_new_key()
 
                 fernet = Fernet(self.encryption_key.encode())
-                print("[SUCCESS] Fernet initialized successfully")
+                logger.info("Fernet initialized successfully")
                 return fernet
 
             except Exception as decode_error:
-                print(f"[ERROR] Key decoding failed: {decode_error}")
+                logger.error("Key decoding failed: %s", decode_error)
                 return self._generate_new_key()
 
         except Exception as e:
-            print(f"[ERROR] Encryption initialization failed: {e}")
+            logger.error("Encryption initialization failed: %s", e)
             return self._generate_new_key()
 
     def _generate_new_key(self):
         """Генерация нового ключа шифрования"""
-        print("[SECURITY] Generating new encryption key...")
+        logger.warning("Generating new temporary encryption key — save it to .env as ENCRYPTION_KEY")
         key = Fernet.generate_key()
         self.encryption_key = key.decode()
-
-        print(f"[INFO] New key (save to .env):")
-        print(f"ENCRYPTION_KEY={self.encryption_key}")
-
         return Fernet(key)
 
     def encrypt(self, data: str) -> str:
         """Шифрование данных"""
-        print(f"[ENCRYPT] Encrypting data of length {len(data)}")
+        if not data:
+            logger.warning("Empty data passed to encrypt()")
+            return ""
+
         try:
-            if not data:
-                print("[WARNING] Empty data for encryption")
-                return ""
-
             encrypted = self.fernet.encrypt(data.encode())
-            result = encrypted.decode()
-            print(f"[SUCCESS] Data encrypted, result: {result[:50]}...")
-            return result
-
+            return encrypted.decode()
         except Exception as e:
-            print(f"[ERROR] Encryption failed: {e}")
-            return data
+            logger.error("Encryption failed: %s", e)
+            raise ValueError("Failed to encrypt data") from e
 
     def decrypt(self, encrypted_data: str) -> str:
         """Расшифровка данных"""
+        if not encrypted_data:
+            logger.warning("Empty data passed to decrypt()")
+            return ""
 
         try:
-            if not encrypted_data:
-                print("[WARNING] Empty data for decryption")
-                return ""
-
             decrypted = self.fernet.decrypt(encrypted_data.encode())
-            result = decrypted.decode()
-            print(f"[SUCCESS] Data decrypted, result: {result[:50]}...")
-            return result
-
+            return decrypted.decode()
         except Exception as e:
-            print(f"[ERROR] Decryption failed: {e}")
-            print(f"   Error type: {type(e).__name__}")
+            logger.error("Decryption failed (%s): %s", type(e).__name__, e)
             return ""
 
     def hash_phone(self, phone_number: str) -> str:
         """Хеширование номера телефона"""
         import hashlib
-        # Убираем все нецифровые символы
         clean_phone = ''.join(filter(str.isdigit, phone_number))
-        # Хешируем с солью
         salt = os.getenv("HASH_SALT", "moysklad_bot_salt")
         return hashlib.sha256(f"{clean_phone}{salt}".encode()).hexdigest()
 

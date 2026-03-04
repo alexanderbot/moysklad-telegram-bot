@@ -1,7 +1,22 @@
 import os
 from dataclasses import dataclass, field
+from datetime import datetime, date
+from zoneinfo import ZoneInfo
 from dotenv import load_dotenv
 from typing import List
+
+# Часовой пояс для регистрации, подписки и отчётов (время в БД и сравнения)
+APP_TIMEZONE = "Europe/Moscow"
+
+
+def now_moscow() -> datetime:
+    """Текущее время по Москве (naive datetime для записи в БД)."""
+    return datetime.now(ZoneInfo(APP_TIMEZONE)).replace(tzinfo=None)
+
+
+def today_moscow() -> date:
+    """Текущая дата по Москве (для сравнения дней подписки и т.п.)."""
+    return datetime.now(ZoneInfo(APP_TIMEZONE)).date()
 
 # Базовая директория проекта (там, где лежит этот файл config.py)
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -42,8 +57,8 @@ class Config:
     SUBSCRIPTION_PRICE_RUB: int = int(os.getenv("SUBSCRIPTION_PRICE_RUB", "199"))
     TELEGRAM_PROVIDER_TOKEN: str = os.getenv("TELEGRAM_PROVIDER_TOKEN", "")
 
-    # Настройки планировщика
-    SCHEDULER_TIMEZONE: str = 'Europe/Moscow'
+    # Настройки планировщика и времени в приложении (регистрация, подписка)
+    SCHEDULER_TIMEZONE: str = APP_TIMEZONE
     DAILY_REPORT_TIME: tuple = (9, 0)  # час, минута
     WEEKLY_REPORT_TIME: tuple = (9, 5)  # понедельник в 9:05
     MONTHLY_REPORT_TIME: tuple = (9, 0)  # 1 число месяца в 9:00

@@ -20,7 +20,7 @@ from keyboards import (
     get_subscription_payment_keyboard,
 )
 from subscription import check_subscription, is_superadmin
-from config import config
+from config import config, now_moscow
 
 logger = logging.getLogger(__name__)
 
@@ -167,7 +167,7 @@ class AuthHandlers:
         try:
             # Проверяем токен через API МойСклад до сохранения
             api = MoyskladAPI(api_token)
-            if not api.validate_token():
+            if not await api.validate_token():
                 await update.message.reply_text(
                     "❌ Не удалось подключиться к API МойСклад с этим токеном.\n"
                     "Проверьте токен (права доступа, срок действия) и введите его еще раз:"
@@ -191,13 +191,13 @@ class AuthHandlers:
                     db_user = self.db.get_user(user.id)
                     sub_status = (db_user.get('subscription_status') or 'none').lower() if db_user else 'none'
                     if sub_status == 'none':
-                        now = datetime.now()
-                        trial_end = now.replace(microsecond=0) + timedelta(days=30)
+                        now = now_moscow().replace(microsecond=0)
+                        trial_end = now + timedelta(days=30)
                         self.db.update_subscription(
                             telegram_id=user.id,
                             status='trial',
                             expires_at=trial_end,
-                            trial_started_at=now.replace(microsecond=0)
+                            trial_started_at=now
                         )
                         logger.info(f"Trial subscription started for user {user.id} until {trial_end}")
                 except Exception as e:
@@ -328,7 +328,7 @@ class AuthHandlers:
         try:
             # Проверяем токен через API МойСклад до сохранения
             api = MoyskladAPI(api_token)
-            if not api.validate_token():
+            if not await api.validate_token():
                 await update.message.reply_text(
                     "❌ Не удалось подключиться к API МойСклад с этим токеном.\n"
                     "Проверьте токен (права доступа, срок действия) и введите его еще раз:"
@@ -637,8 +637,8 @@ class MenuHandlers:
             curr_from, curr_to = get_period_dates(current_period)
             prev_from, prev_to = get_period_dates(previous_period)
 
-            current_report = api.get_sales_report(curr_from, curr_to)
-            previous_report = api.get_sales_report(prev_from, prev_to)
+            current_report = await api.get_sales_report(curr_from, curr_to)
+            previous_report = await api.get_sales_report(prev_from, prev_to)
 
             if current_report and previous_report:
                 # Сравниваем отчеты
@@ -778,7 +778,7 @@ class MenuHandlers:
 
         try:
             api = MoyskladAPI(api_token)
-            report = api.get_sales_report(
+            report = await api.get_sales_report(
                 period_data['date_from'],
                 period_data['date_to']
             )
@@ -1086,7 +1086,7 @@ class MenuHandlers:
 
         try:
             api = MoyskladAPI(api_token)
-            top_items = api.get_top_products(date_from, date_to, limit=20)
+            top_items = await api.get_top_products(date_from, date_to, limit=20)
 
             if not top_items:
                 await update.message.reply_text(
@@ -1504,7 +1504,7 @@ class MenuHandlers:
             if report_type == 'retail_sales':
                 # ✅ ВАЖНО: Используем правильный метод для розничных продаж
                 logger.info(f"🛍 Вызов get_retail_sales_report()")
-                report = api.get_retail_sales_report(date_from, date_to)
+                report = await api.get_retail_sales_report(date_from, date_to)
 
                 if report:
                     report.period = period_display
@@ -1517,7 +1517,7 @@ class MenuHandlers:
 
             elif report_type == 'customer_orders':
                 logger.info(f"📦 Вызов get_sales_report()")
-                report = api.get_sales_report(date_from, date_to)
+                report = await api.get_sales_report(date_from, date_to)
 
                 if report:
                     report.period = period_display
@@ -1530,7 +1530,7 @@ class MenuHandlers:
 
             elif report_type == 'demand':
                 logger.info(f"🚚 Вызов get_demand_report()")
-                report = api.get_demand_report(date_from, date_to)
+                report = await api.get_demand_report(date_from, date_to)
 
                 if report:
                     report.period = period_display
@@ -1543,7 +1543,7 @@ class MenuHandlers:
 
             elif report_type == 'combined_report':
                 logger.info(f"📊 Вызов get_combined_sales_report()")
-                report = api.get_combined_sales_report(date_from, date_to)
+                report = await api.get_combined_sales_report(date_from, date_to)
 
                 if report:
                     report.period = period_display
@@ -1641,7 +1641,7 @@ class MenuHandlers:
 
             # Создаем API клиент и получаем отчет
             api = MoyskladAPI(api_token)
-            quick_report = api.get_quick_report()
+            quick_report = await api.get_quick_report()
 
             if quick_report:
                 # Форматируем и отправляем отчет
@@ -1914,7 +1914,7 @@ class PaymentHandlers:
             await update.message.reply_text("❌ Пользователь не найден в базе. Обратитесь к администратору.")
             return
 
-        now = datetime.now().replace(microsecond=0)
+        now = now_moscow().replace(microsecond=0)
         expires_raw = user_data.get("subscription_expires_at")
 
         if expires_raw:

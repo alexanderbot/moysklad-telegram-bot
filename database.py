@@ -4,6 +4,8 @@ from datetime import datetime
 from typing import Optional, Dict, Any
 from contextlib import contextmanager
 
+from config import now_moscow
+
 logger = logging.getLogger(__name__)
 
 
@@ -103,11 +105,12 @@ class Database:
             if existing:
                 return existing['id']
 
-            # Добавляем нового пользователя
+            # Добавляем нового пользователя (время по Москве)
+            now = now_moscow()
             cursor.execute('''
-                INSERT INTO users (telegram_id, phone_number, last_active)
-                VALUES (?, ?, ?)
-            ''', (telegram_id, phone_number, datetime.now()))
+                INSERT INTO users (telegram_id, phone_number, created_at, last_active)
+                VALUES (?, ?, ?, ?)
+            ''', (telegram_id, phone_number, now, now))
 
             user_id = cursor.lastrowid
 
@@ -128,7 +131,7 @@ class Database:
                 UPDATE users 
                 SET api_token_encrypted = ?, last_active = ?
                 WHERE telegram_id = ?
-            ''', (encrypted_token, datetime.now(), telegram_id))
+            ''', (encrypted_token, now_moscow(), telegram_id))
 
             updated = cursor.rowcount > 0
             if updated:
@@ -187,9 +190,9 @@ class Database:
                 fields.append("trial_started_at = ?")
                 values.append(trial_started_at)
 
-            # всегда обновляем last_active при изменении подписки
+            # всегда обновляем last_active при изменении подписки (по Москве)
             fields.append("last_active = ?")
-            values.append(datetime.now())
+            values.append(now_moscow())
 
             values.append(telegram_id)
 
@@ -216,7 +219,7 @@ class Database:
                 SET subscription_status = ?, last_active = ?
                 WHERE telegram_id = ?
                 ''',
-                (status, datetime.now(), telegram_id)
+                (status, now_moscow(), telegram_id)
             )
             updated = cursor.rowcount > 0
             if updated:
@@ -272,7 +275,7 @@ class Database:
                 UPDATE users 
                 SET last_active = ?
                 WHERE telegram_id = ?
-            ''', (datetime.now(), telegram_id))
+            ''', (now_moscow(), telegram_id))
 
     def get_users_with_notifications(self) -> list:
         """
@@ -325,7 +328,7 @@ class Database:
                 UPDATE user_settings 
                 SET notification_enabled = ?, updated_at = ?
                 WHERE user_id = ?
-            ''', (1 if enabled else 0, datetime.now(), user_id))
+            ''', (1 if enabled else 0, now_moscow(), user_id))
             
             updated = cursor.rowcount > 0
             

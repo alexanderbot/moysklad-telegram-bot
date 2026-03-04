@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime, date
 from typing import Any, Dict, Optional
 
-from config import config
+from config import config, now_moscow, today_moscow
 
 
 FULL_ACCESS_STATUSES = {"trial", "active"}
@@ -45,7 +45,7 @@ def check_subscription(db, telegram_id: int, now: Optional[datetime] = None) -> 
         }
     """
     if now is None:
-        now = datetime.utcnow()
+        now = now_moscow()
 
     if is_superadmin(telegram_id):
         return {
@@ -132,10 +132,10 @@ def check_subscription(db, telegram_id: int, now: Optional[datetime] = None) -> 
 def compute_days_left(expires_at_value: Any, today: Optional[date] = None) -> Optional[int]:
     """
     Вспомогательная функция для расчета дней до окончания по произвольному значению даты.
-    Используется в планировщике напоминаний.
+    Используется в планировщике напоминаний. Даты считаются по Москве.
     """
     if today is None:
-        today = date.today()
+        today = today_moscow()
     dt = _parse_datetime(expires_at_value)
     if not dt:
         return None

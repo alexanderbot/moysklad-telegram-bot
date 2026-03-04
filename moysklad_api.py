@@ -1,10 +1,9 @@
-import requests
+import asyncio
+import httpx
 import logging
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Any, Tuple
 from dataclasses import dataclass, field
-from concurrent.futures import ThreadPoolExecutor
-import json
 
 logger = logging.getLogger(__name__)
 
@@ -177,21 +176,27 @@ class QuickReport:
         return report
 
 class MoyskladAPI:
-    """Класс для работы с API МойСклад"""
+    """Класс для работы с API МойСклад (асинхронный)"""
 
     BASE_URL = "https://api.moysklad.ru/api/remap/1.2"
 
     def __init__(self, api_token: str):
         self.api_token = api_token
-        self.headers = {
-            "Authorization": f"Bearer {self.api_token}",
-            "Accept-Encoding": "gzip",
-            "Content-Type": "application/json"
-        }
-        # Кэш для наименований ассортимента, чтобы не дергать API по одному и тому же href
+        self._client = httpx.AsyncClient(
+            headers={
+                "Authorization": f"Bearer {api_token}",
+                "Accept-Encoding": "gzip",
+                "Content-Type": "application/json",
+            },
+            timeout=30.0,
+        )
         self._assortment_cache: Dict[str, str] = {}
 
-    def _make_request(self, endpoint: str, params: Dict = None) -> Optional[Dict]:
+    async def aclose(self):
+        """Закрытие HTTP-клиента"""
+        await self._client.aclose()
+
+    async def _make_request(self, endpoint: str, params: Dict = None) -> Optional[Dict]:
         """Выполнение запроса к API"""
         url = f"{self.BASE_URL}/{endpoint}"
 
@@ -199,12 +204,7 @@ class MoyskladAPI:
         logger.info(f"📋 Параметры запроса: {params}")
 
         try:
-            response = requests.get(
-                url,
-                headers=self.headers,
-                params=params,
-                timeout=30
-            )
+            response = await self._client.get(url, params=params)
 
             logger.info(f"📡 Статус ответа: {response.status_code}")
 
@@ -214,10 +214,10 @@ class MoyskladAPI:
                 logger.info(f"📊 Возвращено записей: {len(data.get('rows', []))}")
                 return data
             elif response.status_code == 401:
-                logger.error(f"❌ Ошибка 401: Неверный API-токен")
+                logger.error("❌ Ошибка 401: Неверный API-токен")
                 return None
             elif response.status_code == 400:
-                logger.error(f"❌ Ошибка 400: Неверные параметры запроса")
+                logger.error("❌ Ошибка 400: Неверные параметры запроса")
                 logger.error(f"📄 Ответ: {response.text[:500]}")
                 return None
             else:
@@ -225,44 +225,37 @@ class MoyskladAPI:
                 logger.error(f"📄 Ответ: {response.text[:500]}")
                 return None
 
-        except requests.exceptions.Timeout:
+        except httpx.TimeoutException:
             logger.error("⏰ Таймаут при подключении к API МойСклад")
             return None
-        except requests.exceptions.ConnectionError:
+        except httpx.ConnectError:
             logger.error("🔌 Ошибка подключения к API МойСклад")
             return None
-        except requests.exceptions.RequestException as e:
+        except httpx.RequestError as e:
             logger.error(f"❌ Ошибка запроса: {e}")
             return None
         except Exception as e:
             logger.error(f"❌ Неизвестная ошибка: {e}")
             return None
 
-    def get_sales_report(self, date_from: str, date_to: str) -> Optional[MoyskladReport]:
-        """
-        Оптимизированная версия - загружаем позиции одним запросом
-        """
-        logger.info(f"📊 Запрос отчета продаж с {date_from} по {date_to} (оптимизированная версия)")
+    async def get_sales_report(self, date_from: str, date_to: str) -> Optional[MoyskladReport]:
+        """Получение отчета по заказам покупателей за период"""
+        logger.info(f"📊 Запрос отчета продаж с {date_from} по {date_to}")
 
-        # ✅ ИСПРАВЛЕНО: Добавляем expand=positions чтобы получить позиции сразу
         params = {
             "filter": f"created>={date_from} 00:00:00;created<={date_to} 23:59:59",
-            "limit": 1000,  # Максимум на один запрос в API
+            "limit": 1000,
             "order": "created,desc",
-            "expand": "positions"  # ✅ ЗАГРУЖАЕМ ПОЗИЦИИ ВМЕСТЕ С ЗАКАЗАМИ
+            "expand": "positions"
         }
 
-        logger.info(f"📋 Оптимизированные параметры запроса: expand=positions")
-
-        # Получаем заказы покупателей (с пагинацией)
         endpoint = "entity/customerorder"
-        logger.info(f"🌐 Запрос к эндпоинту: {endpoint}")
 
         orders: list[dict] = []
         offset = 0
         while True:
             params["offset"] = offset
-            page_data = self._make_request(endpoint, params)
+            page_data = await self._make_request(endpoint, params)
 
             if not page_data or "rows" not in page_data:
                 if offset == 0:
@@ -274,30 +267,25 @@ class MoyskladAPI:
             orders.extend(rows)
             logger.info(f"✅ Получено заказов с позициями (накопительно): {len(orders)}")
 
-            # Если вернулось меньше лимита — это последняя страница
             if len(rows) < params["limit"]:
                 break
 
             offset += params["limit"]
 
-            # Защита от бесконечного цикла
             if offset > 100000:
                 logger.warning("⚠️ Достигнут защитный лимит 100000 заказов покупателей")
                 break
 
-        # Дополнительная фильтрация на нашей стороне (на всякий случай)
         filtered_orders = []
         for order in orders:
             created_date = order.get('created')
             if created_date:
-                # Преобразуем дату из формата "2024-01-15 10:30:00"
-                order_date = created_date[:10]  # Берем только YYYY-MM-DD
+                order_date = created_date[:10]
                 if date_from <= order_date <= date_to:
                     filtered_orders.append(order)
                 else:
                     logger.debug(f"Заказ {order.get('name')} с датой {order_date} вне периода")
             else:
-                # Если нет даты создания, включаем в отчет
                 filtered_orders.append(order)
 
         orders = filtered_orders
@@ -305,7 +293,6 @@ class MoyskladAPI:
 
         if len(orders) == 0:
             logger.warning(f"⚠️ Нет заказов за период {date_from} - {date_to}")
-            # Возвращаем пустой отчет
             return MoyskladReport(
                 period=f"{date_from} - {date_to}" if date_from != date_to else date_from,
                 total_sales=0,
@@ -319,31 +306,21 @@ class MoyskladAPI:
         products_count = 0
         details = []
 
-        logger.info(f"🔍 Обработка {len(orders)} заказов...")
-
         for order in orders:
-            order_sum = order.get('sum', 0) / 100  # Сумма в копейках, переводим в рубли
+            order_sum = order.get('sum', 0) / 100
             total_sales += order_sum
 
-            # Получаем позиции заказа (опционально)
             order_id = order.get('id')
             order_name = order.get('name', f"Заказ {order_id[:8]}" if order_id else "Без номера")
             order_date = order.get('created', '')[:10] if order.get('created') else 'Неизвестно'
 
-            # Логируем информацию о заказе для отладки
-            logger.debug(f"Заказ: {order_name}, дата: {order_date}, сумма: {order_sum:.2f} ₽")
-
-            # Получаем позиции заказа
             if order_id:
                 positions = order.get('positions', {}).get('rows', [])
                 if positions:
                     for pos in positions:
                         quantity = pos.get('quantity', 0)
                         products_count += quantity
-                        logger.debug(
-                            f"  Позиция: {pos.get('assortment', {}).get('name', 'Без названия')}, количество: {quantity}")
 
-            # Добавляем детали заказа
             order_state = order.get('state', {}).get('name', 'Новый')
 
             details.append({
@@ -359,7 +336,6 @@ class MoyskladAPI:
 
         logger.info(f"📈 Итоги: заказов={total_orders}, сумма={total_sales:.2f} ₽, товаров={int(products_count)}")
 
-        # Формируем период для отчета
         period = f"{date_from} - {date_to}" if date_from != date_to else date_from
 
         return MoyskladReport(
@@ -368,30 +344,26 @@ class MoyskladAPI:
             total_orders=total_orders,
             average_order=average_order,
             products_count=int(products_count),
-            details=details[:10]  # Ограничиваем детали
+            details=details[:10]
         )
 
-    def get_demand_report(self, date_from: str, date_to: str) -> Optional[MoyskladReport]:
-        """
-        Получение отчета по отгрузкам (реализация товаров и услуг) за период.
-        Эндпоинт: entity/demand
-        """
+    async def get_demand_report(self, date_from: str, date_to: str) -> Optional[MoyskladReport]:
+        """Получение отчета по отгрузкам за период"""
         logger.info(f"📊 Запрос отчета по отгрузкам с {date_from} по {date_to}")
 
         params = {
             "filter": f"moment>={date_from} 00:00:00;moment<={date_to} 23:59:59",
-            "limit": 1000,  # Максимум на один запрос в API
+            "limit": 1000,
             "order": "moment,desc",
             "expand": "positions"
         }
 
         endpoint = "entity/demand"
-        # Пагинация по отгрузкам
         demands: list[dict] = []
         offset = 0
         while True:
             params["offset"] = offset
-            page_data = self._make_request(endpoint, params)
+            page_data = await self._make_request(endpoint, params)
 
             if not page_data or "rows" not in page_data:
                 if offset == 0:
@@ -467,61 +439,54 @@ class MoyskladAPI:
             details=details[:10]
         )
 
-    def get_detailed_sales_report(self, date_from: str, date_to: str) -> Optional[Dict]:
+    async def get_detailed_sales_report(self, date_from: str, date_to: str) -> Optional[Dict]:
         """Получение детального отчета о продажах"""
         params = {
             "momentFrom": f"{date_from} 00:00:00",
             "momentTo": f"{date_to} 23:59:59"
         }
 
-        # Используем отчет по продажам
         endpoint = "report/profit/byvariant"
-        data = self._make_request(endpoint, params)
+        data = await self._make_request(endpoint, params)
 
         return data
 
-    def get_stock_report(self) -> Optional[Dict]:
+    async def get_stock_report(self) -> Optional[Dict]:
         """Получение отчета по остаткам"""
         endpoint = "report/stock/all"
-        data = self._make_request(endpoint)
+        data = await self._make_request(endpoint)
         return data
 
-    def validate_token(self) -> bool:
+    async def validate_token(self) -> bool:
         """Проверка валидности API-токена"""
         try:
-            response = requests.get(
+            response = await self._client.get(
                 f"{self.BASE_URL}/entity/counterparty",
-                headers=self.headers,
                 params={"limit": 1},
-                timeout=10
+                timeout=10.0
             )
             return response.status_code == 200
-        except:
+        except Exception:
             return False
 
-    def get_retail_sales_report(self, date_from: str, date_to: str) -> Optional[RetailSalesReport]:
-        """
-        Получение отчета по розничным продажам за период
-        """
+    async def get_retail_sales_report(self, date_from: str, date_to: str) -> Optional[RetailSalesReport]:
+        """Получение отчета по розничным продажам за период"""
         logger.info(f"📊 Запрос отчета по розничным продажам с {date_from} по {date_to}")
 
-        # Основные параметры для розничных продаж
         params = {
             "filter": f"moment>={date_from} 00:00:00;moment<={date_to} 23:59:59",
-            "limit": 1000,  # Максимум на один запрос в API
+            "limit": 1000,
             "order": "moment,desc",
             "expand": "positions,retailStore,retailShift"
         }
 
         endpoint = "entity/retaildemand"
-        logger.info(f"🌐 Оптимизированный запрос: expand=positions,retailStore,retailShift")
 
-        # 🔁 ПАГИНАЦИЯ: загружаем все страницы по 1000 записей
         retail_demands: list[dict] = []
         offset = 0
         while True:
             params["offset"] = offset
-            page_data = self._make_request(endpoint, params)
+            page_data = await self._make_request(endpoint, params)
 
             if not page_data or "rows" not in page_data:
                 if offset == 0:
@@ -533,13 +498,11 @@ class MoyskladAPI:
             retail_demands.extend(rows)
             logger.info(f"✅ Получено розничных продаж (накопительно): {len(retail_demands)}")
 
-            # Если вернулось меньше лимита — это последняя страница
             if len(rows) < params["limit"]:
                 break
 
             offset += params["limit"]
 
-            # Защита от бесконечного цикла на случай странного ответа API
             if offset > 100000:
                 logger.warning("⚠️ Достигнут защитный лимит 100000 записей по розничным продажам")
                 break
@@ -555,7 +518,7 @@ class MoyskladAPI:
         offset = 0
         while True:
             returns_params["offset"] = offset
-            returns_data = self._make_request("entity/retailsalesreturn", returns_params)
+            returns_data = await self._make_request("entity/retailsalesreturn", returns_params)
 
             if not returns_data or "rows" not in returns_data:
                 break
@@ -574,9 +537,6 @@ class MoyskladAPI:
 
         logger.info(f"🔄 Найдено возвратов: {len(returns)}")
 
-        # ===== ИСПРАВЛЕНИЕ НАЧИНАЕТСЯ ЗДЕСЬ =====
-
-        # Обработка данных
         total_sales = 0
         returns_sum = 0
         retail_points = {}
@@ -584,24 +544,20 @@ class MoyskladAPI:
         products_count = 0
         details = []
 
-        # 1. СНАЧАЛА обрабатываем ВСЕ розничные продажи
         logger.info(f"🔍 Обработка {len(retail_demands)} розничных продаж...")
         for demand in retail_demands:
-            demand_sum = demand.get('sum', 0) / 100  # Переводим из копеек в рубли
+            demand_sum = demand.get('sum', 0) / 100
             total_sales += demand_sum
 
-            # Подсчет товаров из позиций (если они загружены)
             positions = demand.get('positions', {}).get('rows', [])
             for pos in positions:
                 quantity = pos.get('quantity', 0)
                 products_count += quantity
 
-            # Информация о торговой точке
             store = demand.get('retailStore', {})
             store_name = store.get('name', 'Не указана')
             retail_points[store_name] = retail_points.get(store_name, 0) + demand_sum
 
-            # Информация о кассире/смене
             cashier_info = {
                 'name': demand.get('name', 'Без номера'),
                 'store': store_name,
@@ -614,7 +570,6 @@ class MoyskladAPI:
 
             cashiers[demand.get('id')] = cashier_info
 
-            # Добавляем детали продажи
             details.append({
                 'id': demand.get('id'),
                 'name': demand.get('name', 'Без номера'),
@@ -625,59 +580,47 @@ class MoyskladAPI:
                 'positions_count': len(positions)
             })
 
-        # 2. ПОТОМ отдельно обрабатываем ВСЕ возвраты
         logger.info(f"🔍 Обработка {len(returns)} возвратов...")
         for return_item in returns:
-            # Сумма возврата обычно отрицательная, берем по модулю
             return_sum = abs(return_item.get('sum', 0) / 100)
             returns_sum += return_sum
 
-            # Получаем информацию о магазине возврата
             return_store = return_item.get('retailStore', {})
             return_store_name = return_store.get('name', 'Не указана')
 
-            # Подсчет возвращенных товаров
             return_positions = return_item.get('positions', {}).get('rows', [])
             return_products_count = 0
             for pos in return_positions:
                 quantity = pos.get('quantity', 0)
                 return_products_count += quantity
 
-            # Вычитаем возвращенные товары из общего количества
             products_count -= return_products_count
 
-            # Обновляем статистику по торговой точке (вычитаем возвраты)
             if return_store_name in retail_points:
                 retail_points[return_store_name] -= return_sum
             else:
                 retail_points[return_store_name] = -return_sum
 
-            # Добавляем детали возврата
             details.append({
                 'id': return_item.get('id'),
                 'name': return_item.get('name', 'Без номера'),
-                'sum': -return_sum,  # Отрицательная сумма
+                'sum': -return_sum,
                 'date': return_item.get('moment', '')[:10],
                 'store': return_store_name,
                 'type': 'Возврат',
                 'positions_count': len(return_positions)
             })
 
-        # ===== ИСПРАВЛЕНИЕ ЗАКОНЧЕНО =====
-
-        # Рассчитываем итоговые показатели
-        total_orders = len(retail_demands) + len(returns)  # Все операции: продажи + возвраты
-        net_sales = total_sales - returns_sum  # Чистые продажи
+        total_orders = len(retail_demands) + len(returns)
+        net_sales = total_sales - returns_sum
 
         if len(retail_demands) > 0:
-            average_order = total_sales / len(retail_demands)  # Средний чек только по продажам
+            average_order = total_sales / len(retail_demands)
         else:
             average_order = 0
 
-        # Форматируем торговые точки
         retail_points_list = []
         for store_name, store_sales in retail_points.items():
-            # Игнорируем точки с нулевыми или отрицательными продажами (после вычета возвратов)
             if store_sales > 0:
                 retail_points_list.append({
                     'name': store_name,
@@ -687,7 +630,6 @@ class MoyskladAPI:
 
         retail_points_list.sort(key=lambda x: x['sales'], reverse=True)
 
-        # Формируем период
         period = f"{date_from} - {date_to}" if date_from != date_to else date_from
 
         logger.info(f"📈 Итоги: Продаж={len(retail_demands)}, "
@@ -697,11 +639,11 @@ class MoyskladAPI:
 
         return RetailSalesReport(
             period=period,
-            total_sales=total_sales,  # Общая сумма продаж (без учета возвратов)
-            total_orders=len(retail_demands),  # Только количество продаж
+            total_sales=total_sales,
+            total_orders=len(retail_demands),
             average_order=average_order,
-            products_count=int(max(products_count, 0)),  # Не может быть отрицательным
-            details=details[:20],  # Ограничиваем детали
+            products_count=int(max(products_count, 0)),
+            details=details[:20],
             retail_points=retail_points_list[:10],
             cashiers=list(cashiers.values())[:10],
             returns_count=len(returns),
@@ -709,25 +651,22 @@ class MoyskladAPI:
         )
 
 
-    def get_combined_sales_report(self, date_from: str, date_to: str) -> Optional[CombinedSalesReport]:
-        """
-        Объединенный отчет: розничные продажи + заказы покупателей
-        """
+    async def get_combined_sales_report(self, date_from: str, date_to: str) -> Optional[CombinedSalesReport]:
+        """Объединенный отчет: розничные продажи + заказы покупателей (параллельно)"""
         logger.info(f"📊 Запрос объединенного отчета с {date_from} по {date_to}")
 
-        # Получаем оба отчета
-        retail_report = self.get_retail_sales_report(date_from, date_to)
-        orders_report = self.get_sales_report(date_from, date_to)  # Существующий метод
+        retail_report, orders_report = await asyncio.gather(
+            self.get_retail_sales_report(date_from, date_to),
+            self.get_sales_report(date_from, date_to),
+        )
 
         if not retail_report or not orders_report:
             logger.error("❌ Не удалось получить один из отчетов")
             return None
 
-        # Рассчитываем общие показатели
         combined_total = retail_report.total_sales + orders_report.total_sales
         combined_orders = retail_report.total_orders + orders_report.total_orders
 
-        # Рассчитываем доли
         retail_share = (retail_report.total_sales / combined_total * 100) if combined_total > 0 else 0
         orders_share = (orders_report.total_sales / combined_total * 100) if combined_total > 0 else 0
 
@@ -743,14 +682,28 @@ class MoyskladAPI:
             orders_share=orders_share
         )
 
-    def get_top_products(self, date_from: str, date_to: str, limit: int = 20) -> Optional[List[Dict[str, Any]]]:
-        """
-        Топ товаров по количеству и сумме продаж за период
-        (заказы покупателей + розничные продажи).
-        """
+    async def get_top_products(self, date_from: str, date_to: str, limit: int = 20) -> Optional[List[Dict[str, Any]]]:
+        """Топ товаров по количеству и сумме продаж за период (заказы + розница)"""
         logger.info(f"📊 Запрос топ-{limit} товаров с {date_from} по {date_to}")
 
         products: Dict[str, Dict[str, float]] = {}
+        semaphore = asyncio.Semaphore(3)
+
+        async def _load_positions(endpoint: str) -> List[Dict[str, Any]]:
+            async with semaphore:
+                pos_data = await self._make_request(endpoint, {"limit": 1000, "expand": "assortment"})
+                return pos_data.get("rows", []) if pos_data and "rows" in pos_data else []
+
+        def _accumulate(positions_list: List[Dict[str, Any]]):
+            for pos in positions_list:
+                assortment = pos.get("assortment", {}) or {}
+                name = assortment.get("name") or "Без названия"
+                quantity = float(pos.get("quantity", 0) or 0)
+                price = (pos.get("price") or 0) / 100
+                amount = quantity * price
+                item = products.setdefault(name, {"quantity": 0.0, "amount": 0.0})
+                item["quantity"] += quantity
+                item["amount"] += amount
 
         # ===== 1. Заказы покупателей =====
         orders_params = {
@@ -758,43 +711,20 @@ class MoyskladAPI:
             "limit": 1000,
             "order": "created,desc"
         }
-        orders_data = self._make_request("entity/customerorder", orders_params)
+        orders_data = await self._make_request("entity/customerorder", orders_params)
 
         if orders_data and 'rows' in orders_data:
             orders = orders_data['rows']
             logger.info(f"📦 Заказы покупателей для топа: {len(orders)}")
 
-            # Собираем ID заказов, для которых нужно загрузить позиции
             order_ids = [o.get("id") for o in orders if o.get("id")]
-            logger.info(f"📦 Будет загружено позиций для {len(order_ids)} заказов (ограниченная параллельность)")
-
-            def load_order_positions(order_id: str) -> List[Dict[str, Any]]:
-                """
-                Загрузка позиций одного заказа.
-                Используем expand=assortment, чтобы сразу получить имя товара и
-                не делать дополнительные запросы в _get_assortment_name.
-                """
-                pos_data = self._make_request(
-                    f"entity/customerorder/{order_id}/positions",
-                    {"limit": 1000, "expand": "assortment"}
-                )
-                return pos_data.get("rows", []) if pos_data and "rows" in pos_data else []
 
             if order_ids:
-                # Ограничиваем количество одновременных запросов, чтобы не ловить 429
-                max_workers = min(3, len(order_ids))
-                with ThreadPoolExecutor(max_workers=max_workers) as executor:
-                    for positions in executor.map(load_order_positions, order_ids):
-                        for pos in positions:
-                            assortment = pos.get("assortment", {}) or {}
-                            name = self._get_assortment_name(assortment)
-                            quantity = float(pos.get("quantity", 0) or 0)
-                            price = (pos.get("price") or 0) / 100  # цена в рублях
-                            amount = quantity * price
-
-                            item = products.setdefault(name, {"quantity": 0.0, "amount": 0.0})
-                            item["quantity"] += quantity
-                            item["amount"] += amount
+                all_positions = await asyncio.gather(
+                    *[_load_positions(f"entity/customerorder/{oid}/positions") for oid in order_ids]
+                )
+                for positions in all_positions:
+                    _accumulate(positions)
 
             logger.info(f"📦 Уникальных товаров из заказов: {len(products)}")
         else:
@@ -806,42 +736,20 @@ class MoyskladAPI:
             "limit": 1000,
             "order": "moment,desc"
         }
-        retail_data = self._make_request("entity/retaildemand", retail_params)
+        retail_data = await self._make_request("entity/retaildemand", retail_params)
 
         if retail_data and 'rows' in retail_data:
             retail_demands = retail_data['rows']
             logger.info(f"🛍 Розничные продажи для топа: {len(retail_demands)}")
 
-            # Собираем ID розничных продаж
             retail_ids = [d.get("id") for d in retail_demands if d.get("id")]
-            logger.info(f"🛍 Будет загружено позиций для {len(retail_ids)} розничных продаж (ограниченная параллельность)")
-
-            def load_retail_positions(demand_id: str) -> List[Dict[str, Any]]:
-                """
-                Загрузка позиций одной розничной продажи.
-                Также используем expand=assortment для получения имени товара.
-                """
-                pos_data = self._make_request(
-                    f"entity/retaildemand/{demand_id}/positions",
-                    {"limit": 1000, "expand": "assortment"}
-                )
-                return pos_data.get("rows", []) if pos_data and "rows" in pos_data else []
 
             if retail_ids:
-                # Ограничиваем количество одновременных запросов, чтобы не ловить 429
-                max_workers = min(3, len(retail_ids))
-                with ThreadPoolExecutor(max_workers=max_workers) as executor:
-                    for positions in executor.map(load_retail_positions, retail_ids):
-                        for pos in positions:
-                            assortment = pos.get("assortment", {}) or {}
-                            name = self._get_assortment_name(assortment)
-                            quantity = float(pos.get("quantity", 0) or 0)
-                            price = (pos.get("price") or 0) / 100  # цена в рублях
-                            amount = quantity * price
-
-                            item = products.setdefault(name, {"quantity": 0.0, "amount": 0.0})
-                            item["quantity"] += quantity
-                            item["amount"] += amount
+                all_positions = await asyncio.gather(
+                    *[_load_positions(f"entity/retaildemand/{did}/positions") for did in retail_ids]
+                )
+                for positions in all_positions:
+                    _accumulate(positions)
 
             logger.info(f"🛍 Уникальных товаров с учётом розницы: {len(products)}")
         else:
@@ -853,7 +761,6 @@ class MoyskladAPI:
 
         logger.info(f"📦 Найдено уникальных товаров (все каналы): {len(products)}")
 
-        # Сортируем по сумме продаж, затем по количеству
         sorted_items = sorted(
             products.items(),
             key=lambda kv: (kv[1]["amount"], kv[1]["quantity"]),
@@ -873,12 +780,8 @@ class MoyskladAPI:
         logger.info(f"✅ Сформирован топ-{len(top_items)} товаров за период")
         return top_items
 
-    def _get_assortment_name(self, assortment: Dict[str, Any]) -> str:
-        """
-        Получение названия товара/услуги по объекту assortment.
-        Если в позиции нет поля name, делаем дополнительный запрос по meta.href и кэшируем результат.
-        """
-        # Если имя уже есть в объекте – сразу возвращаем
+    async def _get_assortment_name(self, assortment: Dict[str, Any]) -> str:
+        """Получение названия товара/услуги по объекту assortment"""
         name = assortment.get("name")
         if name:
             return name
@@ -889,65 +792,51 @@ class MoyskladAPI:
         if not href:
             return "Без названия"
 
-        # Проверяем кэш по href
         cached = self._assortment_cache.get(href)
         if cached:
             return cached
 
         try:
-            logger.debug(f"🔍 Запрос наименование ассортимента по href: {href}")
-            resp = requests.get(href, headers=self.headers, timeout=30)
+            logger.debug(f"🔍 Запрос наименования ассортимента по href: {href}")
+            resp = await self._client.get(href, timeout=30.0)
             if resp.status_code == 200:
                 data = resp.json()
                 name = data.get("name") or "Без названия"
                 self._assortment_cache[href] = name
                 return name
             else:
-                logger.warning(f"⚠️ Не удалось получить наименование ассортимента ({resp.status_code}) по href: {href}")
+                logger.warning(f"⚠️ Не удалось получить наименование ассортимента ({resp.status_code})")
         except Exception as e:
             logger.error(f"❌ Ошибка при получении наименования ассортимента: {e}")
 
         return "Без названия"
 
-    def get_quick_report(self) -> Optional[QuickReport]:
-        """
-        Оптимизированная версия быстрого отчета с параллельными запросами
-        """
-        logger.info("🚀 Формирование быстрого отчета (оптимизированная версия)...")
+    async def get_quick_report(self) -> Optional[QuickReport]:
+        """Быстрый отчет с параллельными запросами"""
+        logger.info("🚀 Формирование быстрого отчета...")
 
-        # Получаем даты для всех периодов
         today_from, today_to = get_period_dates('today')
         week_from, week_to = get_period_dates('week')
         month_from, month_to = get_period_dates('month')
 
-        # Форматируем даты для отображения
-        from datetime import datetime
         today_date = datetime.now().strftime('%d.%m.%Y')
         week_period = f"{week_from} - {week_to}"
         month_name = datetime.now().strftime('%B %Y')
 
         try:
-            # ✅ ОПТИМИЗАЦИЯ: Параллельные запросы для всех периодов
-            with ThreadPoolExecutor(max_workers=3) as executor:
-                # Запускаем все запросы параллельно
-                future_today_retail = executor.submit(self.get_retail_sales_report, today_from, today_to)
-                future_today_orders = executor.submit(self.get_sales_report, today_from, today_to)
+            (
+                today_retail, today_orders,
+                week_retail, week_orders,
+                month_retail, month_orders,
+            ) = await asyncio.gather(
+                self.get_retail_sales_report(today_from, today_to),
+                self.get_sales_report(today_from, today_to),
+                self.get_retail_sales_report(week_from, week_to),
+                self.get_sales_report(week_from, week_to),
+                self.get_retail_sales_report(month_from, month_to),
+                self.get_sales_report(month_from, month_to),
+            )
 
-                future_week_retail = executor.submit(self.get_retail_sales_report, week_from, week_to)
-                future_week_orders = executor.submit(self.get_sales_report, week_from, week_to)
-
-                future_month_retail = executor.submit(self.get_retail_sales_report, month_from, month_to)
-                future_month_orders = executor.submit(self.get_sales_report, month_from, month_to)
-
-                # Получаем результаты
-                today_retail = future_today_retail.result()
-                today_orders = future_today_orders.result()
-                week_retail = future_week_retail.result()
-                week_orders = future_week_orders.result()
-                month_retail = future_month_retail.result()
-                month_orders = future_month_orders.result()
-
-            # Формируем отчет
             quick_report = QuickReport(
                 today_date=today_date,
                 week_period=week_period,
@@ -972,13 +861,12 @@ class MoyskladAPI:
                 }
             )
 
-            logger.info(f"✅ Быстрый отчет сформирован (параллельные запросы)")
+            logger.info("✅ Быстрый отчет сформирован")
             return quick_report
 
         except Exception as e:
             logger.error(f"❌ Ошибка формирования быстрого отчета: {e}", exc_info=True)
             return None
-
 
 
 def get_period_dates(period_type: str) -> tuple:
@@ -1001,19 +889,16 @@ def get_period_dates(period_type: str) -> tuple:
         date_from = date_to = yesterday.strftime('%Y-%m-%d')
 
     elif period_type == 'week':
-        # Текущая неделя (понедельник - воскресенье)
         start_of_week = today - timedelta(days=today.weekday())
         end_of_week = start_of_week + timedelta(days=6)
         date_from = start_of_week.strftime('%Y-%m-%d')
         date_to = end_of_week.strftime('%Y-%m-%d')
 
     elif period_type == 'month':
-        # Текущий месяц
         date_from = today.replace(day=1).strftime('%Y-%m-%d')
         date_to = today.strftime('%Y-%m-%d')
 
     elif period_type == 'last_week':
-        # Прошлая неделя
         today = datetime.now().date()
         start_of_last_week = today - timedelta(days=today.weekday() + 7)
         end_of_last_week = start_of_last_week + timedelta(days=6)
@@ -1021,7 +906,6 @@ def get_period_dates(period_type: str) -> tuple:
         date_to = end_of_last_week.strftime('%Y-%m-%d')
 
     elif period_type == 'last_month':
-        # Прошлый месяц
         today = datetime.now().date()
         first_day_of_month = today.replace(day=1)
         last_day_of_last_month = first_day_of_month - timedelta(days=1)
@@ -1030,12 +914,10 @@ def get_period_dates(period_type: str) -> tuple:
         date_to = last_day_of_last_month.strftime('%Y-%m-%d')
 
     elif period_type == 'year_ago':
-        # Тот же день год назад (приближенно: минус 365 дней)
         year_ago = today - timedelta(days=365)
         date_from = date_to = year_ago.strftime('%Y-%m-%d')
 
     else:
-        # По умолчанию сегодня
         date_from = date_to = today.strftime('%Y-%m-%d')
 
     return date_from, date_to
@@ -1086,7 +968,6 @@ class AnalyticsCalculator:
             previous_report.products_count
         )
 
-        # Форматируем результат
         result = (
             f"📊 *Сравнение периодов*\n\n"
             f"*Текущий период:* {current_report.period}\n"

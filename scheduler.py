@@ -12,7 +12,7 @@ from database import Database
 from moysklad_api import MoyskladAPI, get_period_dates
 from security import security
 from subscription import check_subscription, compute_days_left, is_superadmin
-from config import config
+from config import config, today_moscow
 
 logger = logging.getLogger(__name__)
 
@@ -184,7 +184,7 @@ class StatisticsScheduler:
                     api = self.api_factory(api_token)
                     
                     # Получаем объединенный отчет
-                    report = api.get_combined_sales_report(date_from, date_to)
+                    report = await api.get_combined_sales_report(date_from, date_to)
                     
                     if not report:
                         logger.warning(f"⚠️ Нет данных для пользователя {user_id} за период {period_name}")
@@ -251,7 +251,7 @@ class StatisticsScheduler:
                 logger.info("Нет пользователей для проверки подписки")
                 return
 
-            today = datetime.now().date()
+            today = today_moscow()
 
             for row in users:
                 telegram_id = row.get("telegram_id")

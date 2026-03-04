@@ -1,5 +1,5 @@
 python-telegram-bot==20.7
-requests==2.31.0
+httpx>=0.25.0
 python-dotenv==1.0.0
 cryptography==41.0.7
 pandas==2.1.3
