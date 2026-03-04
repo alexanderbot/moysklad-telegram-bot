@@ -1,4 +1,5 @@
 import logging
+import os
 import asyncio
 from telegram.ext import (
     Application,
@@ -306,6 +307,13 @@ def main():
     except ValueError as e:
         logger.error(f"Configuration error: {e}")
         return
+
+    # Запись логов в файл (папка logs уже создана в setup_dirs)
+    log_file = os.path.join(config.LOGS_DIR, "bot.log")
+    file_handler = logging.FileHandler(log_file, encoding="utf-8")
+    file_handler.setFormatter(logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s"))
+    logging.getLogger().addHandler(file_handler)
+    logger.info(f"Логи записываются в {log_file}")
 
     # Инициализация базы данных
     db = init_database(config.DB_PATH)

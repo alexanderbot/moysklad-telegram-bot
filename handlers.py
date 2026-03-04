@@ -28,6 +28,46 @@ logger = logging.getLogger(__name__)
 REGISTRATION, API_TOKEN = range(2)
 
 
+def require_subscription(mode: str = "full"):
+    """
+    Декоратор для проверки активной подписки перед вызовом обработчика.
+
+    mode="full"    — требует полную подписку (блокирует льготный период)
+    mode="limited" — разрешает льготный период (только быстрые отчёты)
+    """
+    def decorator(func):
+        async def wrapper(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+            user = update.effective_user
+            sub = check_subscription(self.db, user.id)
+
+            if not sub.get("is_superadmin"):
+                if not sub.get("ok"):
+                    await update.message.reply_text(
+                        "❌ Ваша подписка закончилась.\n\n"
+                        f"Для доступа оформите подписку за {config.SUBSCRIPTION_PRICE_RUB}₽/мес "
+                        "через кнопку *\"💳 Подписка\"* в главном меню.",
+                        reply_markup=get_main_menu(True),
+                        parse_mode=ParseMode.MARKDOWN
+                    )
+                    return
+                if mode == "full" and sub.get("mode") == "limited":
+                    await update.message.reply_text(
+                        "ℹ️ Ваша подписка завершилась, сейчас действует льготный период 2 дня.\n\n"
+                        "В это время доступны только *\"Быстрые отчеты\"*.\n"
+                        f"Для полного доступа оформите подписку за {config.SUBSCRIPTION_PRICE_RUB}₽/мес "
+                        "через кнопку *\"💳 Подписка\"* в главном меню.",
+                        reply_markup=get_main_menu(True),
+                        parse_mode=ParseMode.MARKDOWN
+                    )
+                    return
+
+            return await func(self, update, context)
+        wrapper.__name__ = func.__name__
+        wrapper.__doc__ = func.__doc__
+        return wrapper
+    return decorator
+
+
 class AuthHandlers:
     """Обработчики аутентификации"""
 
@@ -488,6 +528,7 @@ class MenuHandlers:
             parse_mode=ParseMode.MARKDOWN
         )
 
+    @require_subscription(mode="full")
     async def show_reports_menu(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Показать меню отчетов"""
         user = update.effective_user
@@ -498,32 +539,9 @@ class MenuHandlers:
             await update.message.reply_text(
                 "❌ Сначала необходимо зарегистрироваться и указать API-токен.\n"
                 "Используйте /start для регистрации.",
-                reply_markup=get_main_menu(False)  # ✅ ПРАВИЛЬНО
+                reply_markup=get_main_menu(False)
             )
             return
-
-        # Проверка подписки (доступ только с активной или триальной подпиской)
-        sub = check_subscription(self.db, user.id)
-        if not sub.get("is_superadmin"):
-            if not sub.get("ok"):
-                await update.message.reply_text(
-                    "❌ Ваша подписка закончилась.\n\n"
-                    f"Для доступа ко всем отчетам оформите подписку за {config.SUBSCRIPTION_PRICE_RUB}₽/мес "
-                    "через кнопку *\"💳 Подписка\"* в главном меню.",
-                    reply_markup=get_main_menu(True),
-                    parse_mode=ParseMode.MARKDOWN
-                )
-                return
-            if sub.get("mode") == "limited":
-                await update.message.reply_text(
-                    "ℹ️ Ваша подписка завершилась, сейчас действует льготный период 2 дня.\n\n"
-                    "В это время доступны только *\"Быстрые отчеты\"*.\n"
-                    f"Для полного доступа оформите подписку за {config.SUBSCRIPTION_PRICE_RUB}₽/мес "
-                    "через кнопку *\"💳 Подписка\"* в главном меню.",
-                    reply_markup=get_main_menu(True),
-                    parse_mode=ParseMode.MARKDOWN
-                )
-                return
 
         await update.message.reply_text(
             "📊 *Отчеты*\n\n"
@@ -532,6 +550,7 @@ class MenuHandlers:
             parse_mode=ParseMode.MARKDOWN
         )
 
+    @require_subscription(mode="full")
     async def show_analytics_menu(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Показать меню аналитики"""
         user = update.effective_user
@@ -542,31 +561,9 @@ class MenuHandlers:
             await update.message.reply_text(
                 "❌ Сначала необходимо зарегистрироваться и указать API-токен.\n"
                 "Используйте /start для регистрации.",
-                reply_markup=get_main_menu(False)  # ✅ ПРАВИЛЬНО
+                reply_markup=get_main_menu(False)
             )
             return
-
-        # Аналитика доступна только при активной подписке
-        sub = check_subscription(self.db, user.id)
-        if not sub.get("is_superadmin"):
-            if not sub.get("ok"):
-                await update.message.reply_text(
-                    "❌ Ваша подписка закончилась.\n\n"
-                    f"Аналитика доступна только при активной подписке {config.SUBSCRIPTION_PRICE_RUB}₽/мес.\n"
-                    "Оформите или продлите подписку через кнопку *\"💳 Подписка\"* в главном меню.",
-                    reply_markup=get_main_menu(True),
-                    parse_mode=ParseMode.MARKDOWN
-                )
-                return
-            if sub.get("mode") == "limited":
-                await update.message.reply_text(
-                    "ℹ️ Ваша подписка завершилась, сейчас действует льготный период 2 дня.\n\n"
-                    "В это время доступны только *\"Быстрые отчеты\"*.\n"
-                    f"Аналитика будет снова доступна после оплаты подписки {config.SUBSCRIPTION_PRICE_RUB}₽/мес.",
-                    reply_markup=get_main_menu(True),
-                    parse_mode=ParseMode.MARKDOWN
-                )
-                return
 
         await update.message.reply_text(
             "📈 *Аналитика*\n\n"
@@ -822,6 +819,7 @@ class MenuHandlers:
             except:
                 pass
 
+    @require_subscription(mode="full")
     async def show_detailed_reports_menu(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Показать меню детализированных отчетов"""
         user = update.effective_user
@@ -834,28 +832,6 @@ class MenuHandlers:
             )
             return
 
-        # Детализированные отчеты доступны только при активной подписке
-        sub = check_subscription(self.db, user.id)
-        if not sub.get("is_superadmin"):
-            if not sub.get("ok"):
-                await update.message.reply_text(
-                    "❌ Ваша подписка закончилась.\n\n"
-                    f"Детализированные отчеты доступны только при активной подписке {config.SUBSCRIPTION_PRICE_RUB}₽/мес.\n"
-                    "Оформите или продлите подписку через кнопку *\"💳 Подписка\"* в главном меню.",
-                    reply_markup=get_main_menu(True),
-                    parse_mode=ParseMode.MARKDOWN
-                )
-                return
-            if sub.get("mode") == "limited":
-                await update.message.reply_text(
-                    "ℹ️ Ваша подписка завершилась, сейчас действует льготный период 2 дня.\n\n"
-                    "В это время доступны только *\"Быстрые отчеты\"*.\n"
-                    f"Детализированные отчеты будут снова доступны после оплаты подписки {config.SUBSCRIPTION_PRICE_RUB}₽/мес.",
-                    reply_markup=get_main_menu(True),
-                    parse_mode=ParseMode.MARKDOWN
-                )
-                return
-
         await update.message.reply_text(
             "📊 *Детализированные отчеты*\n\n"
             "Выберите тип отчета:",
@@ -863,6 +839,7 @@ class MenuHandlers:
             parse_mode=ParseMode.MARKDOWN
         )
 
+    @require_subscription(mode="full")
     async def handle_retail_sales_report_menu(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Меню выбора периода для розничных продаж"""
         user = update.effective_user
@@ -874,26 +851,6 @@ class MenuHandlers:
                 reply_markup=get_main_menu(False)
             )
             return
-
-        sub = check_subscription(self.db, user.id)
-        if not sub.get("is_superadmin"):
-            if not sub.get("ok"):
-                await update.message.reply_text(
-                    "❌ Ваша подписка закончилась.\n\n"
-                    f"Детализированные отчеты по розничным продажам доступны только при активной подписке "
-                    f"{config.SUBSCRIPTION_PRICE_RUB}₽/мес.",
-                    reply_markup=get_main_menu(True),
-                    parse_mode=ParseMode.MARKDOWN
-                )
-                return
-            if sub.get("mode") == "limited":
-                await update.message.reply_text(
-                    "ℹ️ Ваша подписка завершилась, сейчас действует льготный период 2 дня.\n\n"
-                    "Доступны только *\"Быстрые отчеты\"*.",
-                    reply_markup=get_main_menu(True),
-                    parse_mode=ParseMode.MARKDOWN
-                )
-                return
 
         # ✅ Сохраняем тип отчета в контексте
         context.user_data['current_report_type'] = 'retail_sales'
@@ -909,6 +866,7 @@ class MenuHandlers:
 
 
     # ===== ОТГРУЗКИ =====
+    @require_subscription(mode="full")
     async def handle_demand_menu(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Меню выбора периода для отгрузок"""
         user = update.effective_user
@@ -921,25 +879,6 @@ class MenuHandlers:
             )
             return
 
-        sub = check_subscription(self.db, user.id)
-        if not sub.get("is_superadmin"):
-            if not sub.get("ok"):
-                await update.message.reply_text(
-                    "❌ Ваша подписка закончилась.\n\n"
-                    f"Отчеты по отгрузкам доступны только при активной подписке {config.SUBSCRIPTION_PRICE_RUB}₽/мес.",
-                    reply_markup=get_main_menu(True),
-                    parse_mode=ParseMode.MARKDOWN
-                )
-                return
-            if sub.get("mode") == "limited":
-                await update.message.reply_text(
-                    "ℹ️ Ваша подписка завершилась, сейчас действует льготный период 2 дня.\n\n"
-                    "Доступны только *\"Быстрые отчеты\"*.",
-                    reply_markup=get_main_menu(True),
-                    parse_mode=ParseMode.MARKDOWN
-                )
-                return
-
         context.user_data['current_report_type'] = 'demand'
         logger.info(f"✅ Установлен тип отчета: demand для пользователя {user.id}")
 
@@ -951,6 +890,7 @@ class MenuHandlers:
         )
 
     # ===== ЗАКАЗЫ ПОКУПАТЕЛЕЙ =====
+    @require_subscription(mode="full")
     async def handle_customer_orders_menu(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Меню выбора периода для заказов покупателей"""
         user = update.effective_user
@@ -962,26 +902,6 @@ class MenuHandlers:
                 reply_markup=get_main_menu(False)
             )
             return
-
-        sub = check_subscription(self.db, user.id)
-        if not sub.get("is_superadmin"):
-            if not sub.get("ok"):
-                await update.message.reply_text(
-                    "❌ Ваша подписка закончилась.\n\n"
-                    f"Отчеты по заказам покупателей доступны только при активной подписке "
-                    f"{config.SUBSCRIPTION_PRICE_RUB}₽/мес.",
-                    reply_markup=get_main_menu(True),
-                    parse_mode=ParseMode.MARKDOWN
-                )
-                return
-            if sub.get("mode") == "limited":
-                await update.message.reply_text(
-                    "ℹ️ Ваша подписка завершилась, сейчас действует льготный период 2 дня.\n\n"
-                    "Доступны только *\"Быстрые отчеты\"*.",
-                    reply_markup=get_main_menu(True),
-                    parse_mode=ParseMode.MARKDOWN
-                )
-                return
 
         # ✅ Сохраняем тип отчета в контексте
         context.user_data['current_report_type'] = 'customer_orders'
@@ -995,6 +915,7 @@ class MenuHandlers:
         )
 
     # ===== ОБЪЕДИНЕННЫЙ ОТЧЕТ =====
+    @require_subscription(mode="full")
     async def handle_combined_report_menu(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Меню выбора периода для объединенного отчета"""
         user = update.effective_user
@@ -1007,25 +928,6 @@ class MenuHandlers:
             )
             return
 
-        sub = check_subscription(self.db, user.id)
-        if not sub.get("is_superadmin"):
-            if not sub.get("ok"):
-                await update.message.reply_text(
-                    "❌ Ваша подписка закончилась.\n\n"
-                    f"Объединенный отчет доступен только при активной подписке {config.SUBSCRIPTION_PRICE_RUB}₽/мес.",
-                    reply_markup=get_main_menu(True),
-                    parse_mode=ParseMode.MARKDOWN
-                )
-                return
-            if sub.get("mode") == "limited":
-                await update.message.reply_text(
-                    "ℹ️ Ваша подписка завершилась, сейчас действует льготный период 2 дня.\n\n"
-                    "Доступны только *\"Быстрые отчеты\"*.",
-                    reply_markup=get_main_menu(True),
-                    parse_mode=ParseMode.MARKDOWN
-                )
-                return
-
         # ✅ Сохраняем тип отчета в контексте
         context.user_data['current_report_type'] = 'combined_report'
         logger.info(f"✅ Установлен тип отчета: combined_report для пользователя {user.id}")
@@ -1037,6 +939,7 @@ class MenuHandlers:
             parse_mode=ParseMode.MARKDOWN
         )
 
+    @require_subscription(mode="full")
     async def handle_top_products_month(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Отчет по товарам: топ-20 за текущий месяц"""
         user = update.effective_user
@@ -1048,26 +951,6 @@ class MenuHandlers:
                 reply_markup=get_main_menu(False)
             )
             return
-
-        sub = check_subscription(self.db, user.id)
-        if not sub.get("is_superadmin"):
-            if not sub.get("ok"):
-                await update.message.reply_text(
-                    "❌ Ваша подписка закончилась.\n\n"
-                    f"Отчет по топ-20 товаров доступен только при активной подписке "
-                    f"{config.SUBSCRIPTION_PRICE_RUB}₽/мес.",
-                    reply_markup=get_main_menu(True),
-                    parse_mode=ParseMode.MARKDOWN
-                )
-                return
-            if sub.get("mode") == "limited":
-                await update.message.reply_text(
-                    "ℹ️ Ваша подписка завершилась, сейчас действует льготный период 2 дня.\n\n"
-                    "Доступны только *\"Быстрые отчеты\"*.",
-                    reply_markup=get_main_menu(True),
-                    parse_mode=ParseMode.MARKDOWN
-                )
-                return
 
         encrypted_token = user_data['api_token_encrypted']
         api_token = security.decrypt(encrypted_token)
@@ -1358,38 +1241,6 @@ class MenuHandlers:
         # ✅ Сохраняем тип отчета для обработки ввода дат
         context.user_data['expecting_custom_period_for'] = report_type
         logger.info(f"💾 Ожидаем ввод дат для отчета типа '{report_type}'")
-
-
-
-
-
-    # async def ask_custom_period_for_detailed(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-    #     """Запрос произвольного периода для детальных отчетов"""
-    #     report_type = context.user_data.get('report_type', 'customer_orders')
-    #     report_names = {
-    #         'retail_sales': 'розничных продаж',
-    #         'customer_orders': 'заказов покупателей',
-    #         'combined_report': 'объединенного отчета'
-    #     }
-    #
-    #     report_name = report_names.get(report_type, 'отчета')
-    #
-    #     await update.message.reply_text(
-    #         f"🗓 *Произвольный период для {report_name}*\n\n"
-    #         "Введите период в формате:\n"
-    #         "`ДД.ММ.ГГГГ - ДД.ММ.ГГГГ`\n\n"
-    #         "Пример: `01.01.2024 - 31.01.2024`\n\n"
-    #         "Или введите одну дату для отчета за день: `01.01.2024`",
-    #         parse_mode=ParseMode.MARKDOWN,
-    #         reply_markup=get_back_keyboard()
-    #     )
-
-    # def _is_in_detailed_report_flow(context: ContextTypes.DEFAULT_TYPE) -> bool:
-    #     """Проверяем, находится ли пользователь в потоке детальных отчетов"""
-    #     return (
-    #             context.user_data.get('waiting_for_detailed_period') or
-    #             context.user_data.get('detailed_report_type') is not None
-    #     )
 
     async def process_detailed_custom_period(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Обработка произвольного периода для детальных отчетов"""
@@ -1871,10 +1722,11 @@ class PaymentHandlers:
                 prices=prices,
                 need_name=False,
                 need_phone_number=False,
-                need_email=False,
+                need_email=True,
                 need_shipping_address=False,
                 is_flexible=False,
                 start_parameter="subscription",
+                send_email_to_provider=True,
             )
             logger.info(f"✅ Счёт успешно отправлен пользователю {user.id}, message_id={invoice.message_id}")
         except Exception as e:

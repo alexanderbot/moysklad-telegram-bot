@@ -5,6 +5,8 @@ from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Any, Tuple
 from dataclasses import dataclass, field
 
+from config import today_moscow
+
 logger = logging.getLogger(__name__)
 
 
@@ -879,7 +881,7 @@ def get_period_dates(period_type: str) -> tuple:
     Returns:
         tuple: (date_from, date_to) в формате 'YYYY-MM-DD'
     """
-    today = datetime.now().date()
+    today = today_moscow()
 
     if period_type == 'today':
         date_from = date_to = today.strftime('%Y-%m-%d')
@@ -899,14 +901,12 @@ def get_period_dates(period_type: str) -> tuple:
         date_to = today.strftime('%Y-%m-%d')
 
     elif period_type == 'last_week':
-        today = datetime.now().date()
         start_of_last_week = today - timedelta(days=today.weekday() + 7)
         end_of_last_week = start_of_last_week + timedelta(days=6)
         date_from = start_of_last_week.strftime('%Y-%m-%d')
         date_to = end_of_last_week.strftime('%Y-%m-%d')
 
     elif period_type == 'last_month':
-        today = datetime.now().date()
         first_day_of_month = today.replace(day=1)
         last_day_of_last_month = first_day_of_month - timedelta(days=1)
         first_day_of_last_month = last_day_of_last_month.replace(day=1)
