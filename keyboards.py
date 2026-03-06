@@ -13,7 +13,7 @@ def get_main_menu(is_registered: bool = False):
         keyboard = [
             [KeyboardButton("📊 Быстрый отчет"), KeyboardButton("📊 Детальные отчеты")],
             [KeyboardButton("📈 Аналитика"), KeyboardButton("⚙️ Настройки")],
-            [KeyboardButton("💳 Подписка")]
+            [KeyboardButton("🔔 Напоминалки"), KeyboardButton("💳 Подписка")]
         ]
     else:
         keyboard = [

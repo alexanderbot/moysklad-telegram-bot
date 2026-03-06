@@ -77,14 +77,6 @@ async def _paginated_request(self, endpoint: str, params: dict) -> list[dict]:
 
 ---
 
-### 8. ~~Мертвый код в handlers.py~~ ✅
-**Проблема:** Закомментированные методы (строки ~1366–1392) засоряют файл.
-
-**Решение:** Удалить закомментированный код — он сохранён в git-истории.
-
-**Файлы:** `handlers.py` — **выполнено:** закомментированные `ask_custom_period_for_detailed` и `_is_in_detailed_report_flow` удалены.
-
----
 
 ## Новые бизнес-метрики
 

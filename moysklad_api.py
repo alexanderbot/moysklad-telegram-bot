@@ -441,6 +441,157 @@ class MoyskladAPI:
             details=details[:10]
         )
 
+    async def get_reminders_data(self, base_date: str, days_window: int = 10, years_back: int = 5) -> List[Dict[str, Any]]:
+        """
+        Получение данных для напоминалок: отгрузки за окно [base_date .. base_date+days_window]
+        за последние years_back лет. Возвращает список словарей с информацией о контрагентах.
+        """
+        base = datetime.strptime(base_date, '%Y-%m-%d')
+        end_base = base + timedelta(days=days_window)
+        current_year = base.year
+
+        periods: List[Tuple[str, str]] = []
+        for offset in range(1, years_back + 1):
+            year = current_year - offset
+            try:
+                year_start = base.replace(year=year)
+            except ValueError:
+                year_start = base.replace(year=year, day=28)
+            try:
+                year_end = end_base.replace(year=year)
+            except ValueError:
+                year_end = end_base.replace(year=year, day=28)
+            periods.append((year_start.strftime('%Y-%m-%d'), year_end.strftime('%Y-%m-%d')))
+
+        logger.info(f"🔔 Напоминалки: окно {base_date} + {days_window} дн., периоды: {periods}")
+
+        async def _fetch_demands_for_period(date_from: str, date_to: str) -> List[Dict]:
+            params = {
+                "filter": f"moment>={date_from} 00:00:00;moment<={date_to} 23:59:59",
+                "limit": 1000,
+                "order": "moment,desc",
+                "expand": "agent"
+            }
+            all_demands: List[Dict] = []
+            offset = 0
+            while True:
+                params["offset"] = offset
+                page_data = await self._make_request("entity/demand", params)
+                if not page_data or "rows" not in page_data:
+                    break
+                rows = page_data.get("rows", [])
+                all_demands.extend(rows)
+                if len(rows) < params["limit"]:
+                    break
+                offset += params["limit"]
+                if offset > 100000:
+                    break
+            return all_demands
+
+        all_period_demands = await asyncio.gather(
+            *[_fetch_demands_for_period(d_from, d_to) for d_from, d_to in periods]
+        )
+
+        agent_hrefs_to_fetch: Dict[str, str] = {}
+        agent_names_cache: Dict[str, str] = {}
+        raw_rows: List[Dict[str, Any]] = []
+
+        for demands in all_period_demands:
+            for demand in demands:
+                demand_date = demand.get('moment', '')[:10] if demand.get('moment') else ''
+                demand_id = demand.get('id', '')
+
+                agent = demand.get('agent')
+                agent_name = '—'
+                agent_phone = ''
+                agent_href = ''
+
+                if isinstance(agent, dict):
+                    agent_name = agent.get('name', '—')
+                    agent_phone = agent.get('phone', '')
+                    meta = agent.get('meta') or {}
+                    agent_href = meta.get('href', '')
+
+                    if agent_name == '—' and agent_href:
+                        agent_hrefs_to_fetch[agent_href] = ''
+                elif isinstance(agent, str):
+                    agent_href = agent
+                    agent_hrefs_to_fetch[agent_href] = ''
+
+                raw_rows.append({
+                    'demand_date': demand_date,
+                    'demand_id': demand_id,
+                    'agent_name': agent_name,
+                    'agent_phone': agent_phone,
+                    'agent_href': agent_href,
+                })
+
+                if not agent_phone and agent_href:
+                    agent_hrefs_to_fetch[agent_href] = ''
+
+        if agent_hrefs_to_fetch:
+            logger.info(f"🔍 Загрузка данных для {len(agent_hrefs_to_fetch)} контрагентов...")
+            semaphore = asyncio.Semaphore(3)
+
+            async def _fetch_counterparty(href: str) -> Tuple[str, Dict[str, str]]:
+                async with semaphore:
+                    max_retries = 4
+                    for attempt in range(max_retries):
+                        try:
+                            resp = await self._client.get(href, timeout=15.0)
+                            if resp.status_code == 200:
+                                data = resp.json()
+                                return href, {
+                                    'name': data.get('name', '—'),
+                                    'phone': data.get('phone', ''),
+                                }
+                            elif resp.status_code == 429:
+                                wait = 1.0 * (2 ** attempt)
+                                logger.warning(f"⏳ 429 rate limit, retry {attempt+1}/{max_retries} через {wait}с: {href[-40:]}")
+                                await asyncio.sleep(wait)
+                                continue
+                            else:
+                                logger.warning(f"⚠️ Контрагент {resp.status_code}: {href[-40:]}")
+                                break
+                        except Exception as e:
+                            logger.warning(f"Ошибка загрузки контрагента: {e}")
+                            break
+                    return href, {'name': '—', 'phone': ''}
+
+            hrefs_list = list(agent_hrefs_to_fetch.keys())
+            counterparty_map: Dict[str, Dict[str, str]] = {}
+            batch_size = 10
+            for i in range(0, len(hrefs_list), batch_size):
+                batch = hrefs_list[i:i + batch_size]
+                results = await asyncio.gather(
+                    *[_fetch_counterparty(href) for href in batch]
+                )
+                counterparty_map.update(dict(results))
+                if i + batch_size < len(hrefs_list):
+                    await asyncio.sleep(0.3)
+
+            for row in raw_rows:
+                href = row.get('agent_href', '')
+                if href and href in counterparty_map:
+                    cp = counterparty_map[href]
+                    if row['agent_name'] == '—' and cp['name'] != '—':
+                        row['agent_name'] = cp['name']
+                    if not row['agent_phone'] and cp['phone']:
+                        row['agent_phone'] = cp['phone']
+
+        result: List[Dict[str, Any]] = []
+        for row in raw_rows:
+            result.append({
+                'demand_date': row['demand_date'],
+                'demand_id': row.get('demand_id', ''),
+                'agent_name': row['agent_name'],
+                'agent_phone': row['agent_phone'] or '—',
+            })
+
+        result.sort(key=lambda x: x['demand_date'])
+        logger.info(f"✅ Напоминалки: найдено {len(result)} записей")
+        return result
+
     async def get_detailed_sales_report(self, date_from: str, date_to: str) -> Optional[Dict]:
         """Получение детального отчета о продажах"""
         params = {

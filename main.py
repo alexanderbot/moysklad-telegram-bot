@@ -16,7 +16,7 @@ from telegram.constants import ParseMode
 
 from config import config
 from database import init_database
-from handlers import AuthHandlers, MenuHandlers, NotificationHandlers, PaymentHandlers, REGISTRATION, API_TOKEN
+from handlers import AuthHandlers, MenuHandlers, NotificationHandlers, PaymentHandlers, ReminderHandlers, REGISTRATION, API_TOKEN, WAITING_REMINDER_DATE
 from keyboards import get_main_menu
 from scheduler import StatisticsScheduler
 from moysklad_api import MoyskladAPI
@@ -139,6 +139,7 @@ def setup_handlers(application, db):
     menu = MenuHandlers(db)
     notifications = NotificationHandlers(db)
     payments = PaymentHandlers(db)
+    reminder = ReminderHandlers(db)
 
     # ===== 1. СОЗДАЕМ ВСЕ ConversationHandler =====
 
@@ -180,9 +181,26 @@ def setup_handlers(application, db):
         fallbacks=[CommandHandler('cancel', auth.cancel_registration)]
     )
 
+    # ConversationHandler для напоминалок
+    reminder_handler = ConversationHandler(
+        entry_points=[
+            MessageHandler(filters.Regex('^(🔔 Напоминалки)$'), reminder.ask_reminder_date)
+        ],
+        states={
+            WAITING_REMINDER_DATE: [
+                MessageHandler(filters.Regex('^(🔙 Назад)$'), reminder.cancel_reminder),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, reminder.process_reminder_date),
+            ]
+        },
+        fallbacks=[
+            CommandHandler('cancel', reminder.cancel_reminder)
+        ]
+    )
+
     # 1. Сначала ConversationHandler
     application.add_handler(registration_handler)
     application.add_handler(token_update_handler)
+    application.add_handler(reminder_handler)
 
     # 2. Команды
     application.add_handler(CommandHandler("start", start))

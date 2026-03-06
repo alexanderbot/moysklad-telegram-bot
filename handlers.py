@@ -1,4 +1,6 @@
 import logging
+import os
+import tempfile
 from telegram import Update, ReplyKeyboardRemove, LabeledPrice
 from telegram.ext import ContextTypes, ConversationHandler, MessageHandler, filters, CommandHandler, CallbackQueryHandler, PreCheckoutQueryHandler
 from telegram.constants import ParseMode
@@ -26,6 +28,7 @@ logger = logging.getLogger(__name__)
 
 # Состояния для ConversationHandler
 REGISTRATION, API_TOKEN = range(2)
+WAITING_REMINDER_DATE = 'WAITING_REMINDER_DATE'
 
 
 def require_subscription(mode: str = "full"):
@@ -1799,3 +1802,218 @@ class PaymentHandlers:
             parse_mode=ParseMode.MARKDOWN,
             reply_markup=get_main_menu(True)
         )
+
+
+class ReminderHandlers:
+    """Обработчики напоминалок — выгрузка клиентов по отгрузкам за прошлые годы"""
+
+    def __init__(self, db: Database):
+        self.db = db
+
+    @require_subscription(mode="full")
+    async def ask_reminder_date(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Запрос даты для формирования напоминалок"""
+        user = update.effective_user
+        user_data = self.db.get_user(user.id)
+
+        if not user_data or not user_data.get('api_token_encrypted'):
+            await update.message.reply_text(
+                "❌ Сначала необходимо зарегистрироваться и указать API-токен.",
+                reply_markup=get_main_menu(False)
+            )
+            return ConversationHandler.END
+
+        await update.message.reply_text(
+            "🔔 *Напоминалки клиентам*\n\n"
+            "Введите дату, от которой считать отгрузки.\n"
+            "Бот найдёт всех клиентов, кто покупал в окне "
+            "*дата — дата+10 дней* за последние 5 лет "
+            "и сформирует Excel-файл.\n\n"
+            "Формат: `ДД.ММ.ГГГГ`\n"
+            "Пример: `05.03.2026`\n\n"
+            "Для отмены нажмите /cancel",
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=get_back_keyboard()
+        )
+        return WAITING_REMINDER_DATE
+
+    async def process_reminder_date(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Обработка введённой даты, загрузка данных и отправка Excel"""
+        user = update.effective_user
+        user_input = update.message.text.strip()
+
+        if user_input == "🔙 Назад":
+            user_data = self.db.get_user(user.id)
+            is_registered = user_data and user_data.get('api_token_encrypted')
+            await update.message.reply_text(
+                "📱 *Главное меню*\n\nВыберите нужный раздел:",
+                reply_markup=get_main_menu(is_registered),
+                parse_mode=ParseMode.MARKDOWN
+            )
+            return ConversationHandler.END
+
+        try:
+            base_date = datetime.strptime(user_input, '%d.%m.%Y')
+        except ValueError:
+            await update.message.reply_text(
+                "❌ Неверный формат даты.\n"
+                "Используйте формат: `ДД.ММ.ГГГГ`\n"
+                "Пример: `05.03.2026`",
+                parse_mode=ParseMode.MARKDOWN
+            )
+            return WAITING_REMINDER_DATE
+
+        user_data = self.db.get_user(user.id)
+        if not user_data or not user_data.get('api_token_encrypted'):
+            await update.message.reply_text(
+                "❌ Сначала необходимо зарегистрироваться.",
+                reply_markup=get_main_menu(False)
+            )
+            return ConversationHandler.END
+
+        encrypted_token = user_data['api_token_encrypted']
+        api_token = security.decrypt(encrypted_token)
+
+        if not api_token:
+            await update.message.reply_text(
+                "❌ Ошибка расшифровки токена. Обновите API-токен.",
+                reply_markup=get_settings_keyboard()
+            )
+            return ConversationHandler.END
+
+        end_date = base_date + timedelta(days=10)
+        loading_msg = await update.message.reply_text(
+            f"⏳ Ищем отгрузки за окно {base_date.strftime('%d.%m')} — "
+            f"{end_date.strftime('%d.%m')} за последние 5 лет..."
+        )
+
+        try:
+            api = MoyskladAPI(api_token)
+            reminders = await api.get_reminders_data(
+                base_date.strftime('%Y-%m-%d'),
+                days_window=10,
+                years_back=5
+            )
+
+            if not reminders:
+                await update.message.reply_text(
+                    "📭 Не найдено отгрузок за указанный период в прошлые годы.",
+                    reply_markup=get_main_menu(True)
+                )
+                return ConversationHandler.END
+
+            import pandas as pd
+
+            rows = []
+            for r in reminders:
+                demand_date_str = r['demand_date']
+                try:
+                    demand_dt = datetime.strptime(demand_date_str, '%Y-%m-%d')
+                    display_date = demand_dt.strftime('%d.%m.%Y')
+                except ValueError:
+                    display_date = demand_date_str
+
+                name = r['agent_name']
+                phone = r['agent_phone']
+                demand_id = r.get('demand_id', '')
+
+                if phone and phone != '—':
+                    phone_clean = '+' + ''.join(c for c in phone if c.isdigit())
+                else:
+                    phone_clean = ''
+                tg_link = f'https://t.me/{phone_clean}' if phone_clean else '—'
+
+                ms_link = (
+                    f'https://online.moysklad.ru/app/#demand/edit?id={demand_id}'
+                    if demand_id else '—'
+                )
+
+                text = (
+                    f'{name}, добрый день, это Алеся из компании "Мастер баллон" '
+                    f'вы у нас делали заказ на {display_date}, '
+                    f'скажите в этом году актуально?'
+                )
+                rows.append({
+                    'Дата отгрузки': display_date,
+                    'Отгрузка в МС': ms_link,
+                    'Имя контрагента': name,
+                    'Телефон контрагента': phone,
+                    'Телеграм': tg_link,
+                    'Текст рассылки': text,
+                })
+
+            df = pd.DataFrame(rows)
+
+            with tempfile.NamedTemporaryFile(
+                suffix='.xlsx',
+                prefix=f'reminders_{base_date.strftime("%d%m%Y")}_',
+                delete=False
+            ) as tmp:
+                tmp_path = tmp.name
+
+            with pd.ExcelWriter(tmp_path, engine='openpyxl') as writer:
+                df.to_excel(writer, index=False, sheet_name='Напоминалки')
+                ws = writer.sheets['Напоминалки']
+                ws.column_dimensions['A'].width = 16
+                ws.column_dimensions['B'].width = 60
+                ws.column_dimensions['C'].width = 30
+                ws.column_dimensions['D'].width = 22
+                ws.column_dimensions['E'].width = 32
+                ws.column_dimensions['F'].width = 80
+
+            with open(tmp_path, 'rb') as f:
+                await context.bot.send_document(
+                    chat_id=update.effective_chat.id,
+                    document=f,
+                    filename=f'Напоминалки_{base_date.strftime("%d.%m.%Y")}.xlsx',
+                    caption=(
+                        f"🔔 *Напоминалки*\n\n"
+                        f"Период: {base_date.strftime('%d.%m')} — {end_date.strftime('%d.%m')} "
+                        f"за последние 5 лет\n"
+                        f"Найдено записей: {len(rows)}"
+                    ),
+                    parse_mode=ParseMode.MARKDOWN
+                )
+
+            os.unlink(tmp_path)
+
+            self.db.log_request(
+                user_data['id'],
+                'reminders',
+                f"{base_date.strftime('%Y-%m-%d')} window=10d years=5"
+            )
+
+            await update.message.reply_text(
+                "✅ Файл с напоминалками отправлен!",
+                reply_markup=get_main_menu(True)
+            )
+
+        except Exception as e:
+            logger.error(f"❌ Ошибка при формировании напоминалок: {e}", exc_info=True)
+            await update.message.reply_text(
+                f"❌ Ошибка при формировании напоминалок: {str(e)[:150]}",
+                reply_markup=get_main_menu(True)
+            )
+
+        finally:
+            try:
+                await context.bot.delete_message(
+                    chat_id=update.effective_chat.id,
+                    message_id=loading_msg.message_id
+                )
+            except Exception:
+                pass
+
+        return ConversationHandler.END
+
+    async def cancel_reminder(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Отмена формирования напоминалок"""
+        user = update.effective_user
+        user_data = self.db.get_user(user.id)
+        is_registered = user_data and user_data.get('api_token_encrypted')
+
+        await update.message.reply_text(
+            "❌ Формирование напоминалок отменено.",
+            reply_markup=get_main_menu(is_registered)
+        )
+        return ConversationHandler.END
