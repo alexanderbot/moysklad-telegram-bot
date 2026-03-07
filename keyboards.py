@@ -13,7 +13,8 @@ def get_main_menu(is_registered: bool = False):
         keyboard = [
             [KeyboardButton("📊 Быстрый отчет"), KeyboardButton("📊 Детальные отчеты")],
             [KeyboardButton("📈 Аналитика"), KeyboardButton("⚙️ Настройки")],
-            [KeyboardButton("🔔 Напоминалки"), KeyboardButton("💳 Подписка")]
+            [KeyboardButton("🔔 Напоминалки"), KeyboardButton("💳 Подписка")],
+            [KeyboardButton("🤖 ИИ Ассистент")],
         ]
     else:
         keyboard = [
@@ -100,6 +101,15 @@ def get_subscription_payment_keyboard() -> InlineKeyboardMarkup:
         [InlineKeyboardButton("💳 Оплатить в Telegram", callback_data="pay_subscription")]
     ]
     return InlineKeyboardMarkup(keyboard)
+
+
+def get_ai_chat_keyboard() -> ReplyKeyboardMarkup:
+    """Клавиатура для режима диалога с ИИ"""
+    keyboard = [
+        [KeyboardButton("🗑 Очистить историю диалога")],
+        [KeyboardButton("🔙 Назад")],
+    ]
+    return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
 
 
 def get_notifications_keyboard(enabled: bool) -> ReplyKeyboardMarkup:

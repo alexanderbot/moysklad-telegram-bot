@@ -52,6 +52,9 @@ class Config:
     list(map(int, os.getenv("ADMIN_IDS", "").split(","))) if os.getenv("ADMIN_IDS") else []
                                  )
 
+    # GigaChat
+    GIGACHAT_CREDENTIALS: str = os.getenv("GIGACHAT_CREDENTIALS", "")
+
     # Подписка
     SUBSCRIPTION_PAYMENT_URL: str = os.getenv("SUBSCRIPTION_PAYMENT_URL", "")
     SUBSCRIPTION_PRICE_RUB: int = int(os.getenv("SUBSCRIPTION_PRICE_RUB", "199"))

@@ -16,7 +16,7 @@ from telegram.constants import ParseMode
 
 from config import config
 from database import init_database
-from handlers import AuthHandlers, MenuHandlers, NotificationHandlers, PaymentHandlers, ReminderHandlers, REGISTRATION, API_TOKEN, WAITING_REMINDER_DATE
+from handlers import AuthHandlers, MenuHandlers, NotificationHandlers, PaymentHandlers, ReminderHandlers, GigaChatHandlers, REGISTRATION, API_TOKEN, WAITING_REMINDER_DATE, GIGACHAT_DIALOG
 from keyboards import get_main_menu
 from scheduler import StatisticsScheduler
 from moysklad_api import MoyskladAPI
@@ -140,6 +140,7 @@ def setup_handlers(application, db):
     notifications = NotificationHandlers(db)
     payments = PaymentHandlers(db)
     reminder = ReminderHandlers(db)
+    ai_chat = GigaChatHandlers(db)
 
     # ===== 1. СОЗДАЕМ ВСЕ ConversationHandler =====
 
@@ -197,10 +198,28 @@ def setup_handlers(application, db):
         ]
     )
 
+    # ConversationHandler для ИИ-ассистента
+    ai_chat_handler = ConversationHandler(
+        entry_points=[
+            MessageHandler(filters.Regex(r'^(🤖 ИИ Ассистент)$'), ai_chat.enter_ai_chat)
+        ],
+        states={
+            GIGACHAT_DIALOG: [
+                MessageHandler(filters.Regex(r'^(🔙 Назад)$'), ai_chat.exit_ai_chat),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, ai_chat.handle_ai_message),
+            ]
+        },
+        fallbacks=[
+            CommandHandler("cancel", ai_chat.exit_ai_chat),
+            MessageHandler(filters.Regex(r'^(🔙 Назад)$'), ai_chat.exit_ai_chat),
+        ],
+    )
+
     # 1. Сначала ConversationHandler
     application.add_handler(registration_handler)
     application.add_handler(token_update_handler)
     application.add_handler(reminder_handler)
+    application.add_handler(ai_chat_handler)
 
     # 2. Команды
     application.add_handler(CommandHandler("start", start))

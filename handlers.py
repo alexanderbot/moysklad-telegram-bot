@@ -20,6 +20,7 @@ from keyboards import (
     get_detailed_period_keyboard,
     get_notifications_keyboard,
     get_subscription_payment_keyboard,
+    get_ai_chat_keyboard,
 )
 from subscription import check_subscription, is_superadmin
 from config import config, now_moscow
@@ -1929,7 +1930,7 @@ class ReminderHandlers:
                 )
 
                 text = (
-                    f'{name}, добрый день, это Алеся из компании "Мастер баллон" '
+                    f'{name}, добрый день, это Ольга из компании "" '
                     f'вы у нас делали заказ на {display_date}, '
                     f'скажите в этом году актуально?'
                 )
@@ -2015,5 +2016,152 @@ class ReminderHandlers:
         await update.message.reply_text(
             "❌ Формирование напоминалок отменено.",
             reply_markup=get_main_menu(is_registered)
+        )
+        return ConversationHandler.END
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# GigaChat ИИ-ассистент
+# ──────────────────────────────────────────────────────────────────────────────
+
+GIGACHAT_DIALOG = "GIGACHAT_DIALOG"
+
+
+class GigaChatHandlers:
+    """Обработчики диалога с GigaChat ИИ-ассистентом."""
+
+    def __init__(self, db: Database):
+        self.db = db
+
+    async def enter_ai_chat(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Вход в режим диалога с ИИ."""
+        from gigachat_handler import gigachat_assistant
+
+        user = update.effective_user
+        user_data = self.db.get_user(user.id)
+
+        if not user_data or not user_data.get("api_token_encrypted"):
+            await update.message.reply_text(
+                "❌ Для использования ИИ-ассистента сначала зарегистрируйтесь и добавьте API-токен МойСклад.",
+                reply_markup=get_main_menu(False),
+            )
+            return ConversationHandler.END
+
+        sub = check_subscription(self.db, user.id)
+        if not sub.get("is_superadmin") and not sub.get("ok"):
+            await update.message.reply_text(
+                "❌ ИИ-ассистент доступен только с активной подпиской.\n\n"
+                f"Оформите подписку за {config.SUBSCRIPTION_PRICE_RUB}₽/мес через кнопку *\"💳 Подписка\"*.",
+                reply_markup=get_main_menu(True),
+                parse_mode=ParseMode.MARKDOWN,
+            )
+            return ConversationHandler.END
+
+        if not gigachat_assistant.is_configured():
+            await update.message.reply_text(
+                "⚠️ ИИ-ассистент не настроен.\n\n"
+                "Администратору необходимо добавить `GIGACHAT_CREDENTIALS` в файл `.env`.\n"
+                "Ключ можно получить на: https://developers.sber.ru/portal/products/gigachat",
+                reply_markup=get_main_menu(True),
+                parse_mode=ParseMode.MARKDOWN,
+            )
+            return ConversationHandler.END
+
+        context.user_data["ai_history"] = []
+
+        await update.message.reply_text(
+            "🤖 *ИИ-ассистент МойСклад*\n\n"
+            "Задайте любой вопрос о вашем складе на русском языке:\n\n"
+            "Примеры:\n"
+            "• «Сколько продали сегодня?»\n"
+            "• «Какие товары заканчиваются?»\n"
+            "• «Топ товаров за месяц»\n"
+            "• «Сводку за неделю»\n\n"
+            "Для выхода нажмите *🔙 Назад*.",
+            reply_markup=get_ai_chat_keyboard(),
+            parse_mode=ParseMode.MARKDOWN,
+        )
+        return GIGACHAT_DIALOG
+
+    async def handle_ai_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Обработка сообщения в режиме диалога с ИИ."""
+        from gigachat_handler import gigachat_assistant
+
+        user = update.effective_user
+        text = update.message.text
+
+        if text == "🗑 Очистить историю диалога":
+            context.user_data["ai_history"] = []
+            await update.message.reply_text(
+                "🗑 История диалога очищена. Можете начать новый разговор.",
+                reply_markup=get_ai_chat_keyboard(),
+            )
+            return GIGACHAT_DIALOG
+
+        user_data = self.db.get_user(user.id)
+        if not user_data or not user_data.get("api_token_encrypted"):
+            await update.message.reply_text(
+                "❌ Не найден API-токен МойСклад.",
+                reply_markup=get_main_menu(False),
+            )
+            return ConversationHandler.END
+
+        try:
+            api_token = security.decrypt(user_data["api_token_encrypted"])
+        except Exception:
+            await update.message.reply_text(
+                "❌ Ошибка расшифровки API-токена. Попробуйте обновить токен в настройках.",
+                reply_markup=get_main_menu(True),
+            )
+            return ConversationHandler.END
+
+        loading_msg = await update.message.reply_text("⏳ Думаю...")
+
+        try:
+            history = context.user_data.get("ai_history", [])
+            answer, new_history = await gigachat_assistant.ask(
+                user_message=text,
+                api_token=api_token,
+                history=history,
+            )
+            context.user_data["ai_history"] = new_history
+
+            await context.bot.delete_message(
+                chat_id=update.effective_chat.id,
+                message_id=loading_msg.message_id,
+            )
+
+            await update.message.reply_text(
+                answer,
+                reply_markup=get_ai_chat_keyboard(),
+                parse_mode=ParseMode.MARKDOWN,
+            )
+
+        except Exception as e:
+            logger.error(f"Ошибка GigaChat для пользователя {user.id}: {e}", exc_info=True)
+            try:
+                await context.bot.delete_message(
+                    chat_id=update.effective_chat.id,
+                    message_id=loading_msg.message_id,
+                )
+            except Exception:
+                pass
+            await update.message.reply_text(
+                "❌ Не удалось получить ответ от ИИ. Попробуйте позже.",
+                reply_markup=get_ai_chat_keyboard(),
+            )
+
+        return GIGACHAT_DIALOG
+
+    async def exit_ai_chat(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Выход из режима диалога с ИИ."""
+        context.user_data.pop("ai_history", None)
+        user = update.effective_user
+        user_data = self.db.get_user(user.id)
+        is_registered = bool(user_data and user_data.get("api_token_encrypted"))
+
+        await update.message.reply_text(
+            "👋 Вышли из режима ИИ-ассистента.",
+            reply_markup=get_main_menu(is_registered),
         )
         return ConversationHandler.END
