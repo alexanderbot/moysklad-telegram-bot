@@ -1,6 +1,7 @@
 import logging
 import os
 import tempfile
+from openpyxl.styles import Font
 from telegram import Update, ReplyKeyboardRemove, LabeledPrice
 from telegram.ext import ContextTypes, ConversationHandler, MessageHandler, filters, CommandHandler, CallbackQueryHandler, PreCheckoutQueryHandler
 from telegram.constants import ParseMode
@@ -1961,6 +1962,15 @@ class ReminderHandlers:
                 ws.column_dimensions['D'].width = 22
                 ws.column_dimensions['E'].width = 32
                 ws.column_dimensions['F'].width = 80
+
+                link_font = Font(color="0563C1", underline="single")
+                for row_idx in range(2, len(rows) + 2):
+                    for col in (2, 5):
+                        cell = ws.cell(row=row_idx, column=col)
+                        val = cell.value
+                        if val and isinstance(val, str) and (val.startswith("http://") or val.startswith("https://")):
+                            cell.hyperlink = val
+                            cell.font = link_font
 
             with open(tmp_path, 'rb') as f:
                 await context.bot.send_document(
