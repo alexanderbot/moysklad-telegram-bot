@@ -125,11 +125,15 @@ def get_notifications_keyboard(enabled: bool) -> ReplyKeyboardMarkup:
     if enabled:
         keyboard = [
             [KeyboardButton("🔕 Выключить уведомления")],
+            [KeyboardButton("🕒 Время: ежедневно"), KeyboardButton("🕒 Время: неделя")],
+            [KeyboardButton("🕒 Время: месяц")],
             [KeyboardButton("◀️ Назад в меню")]
         ]
     else:
         keyboard = [
             [KeyboardButton("🔔 Включить уведомления")],
+            [KeyboardButton("🕒 Время: ежедневно"), KeyboardButton("🕒 Время: неделя")],
+            [KeyboardButton("🕒 Время: месяц")],
             [KeyboardButton("◀️ Назад в меню")]
         ]
     

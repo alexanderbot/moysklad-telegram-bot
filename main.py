@@ -121,9 +121,9 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 3. Введите API-токен из МойСклад
 
 *Автоматические отчеты:*
-• Ежедневно в 9:00 - статистика за вчера
-• Понедельник в 9:05 - статистика за неделю
-• 1 число месяца в 9:00 - отчет за месяц
+• Ежедневно - статистика за вчера
+• Понедельник - статистика за неделю
+• 1 число месяца - отчет за месяц
 
 Управление: /notifications
 
@@ -326,8 +326,13 @@ def setup_handlers(application, db):
 
     # 11. Управление уведомлениями (обработчики кнопок)
     application.add_handler(MessageHandler(
-        filters.Regex('^(🔔 Включить уведомления|🔕 Выключить уведомления|◀️ Назад в меню)$'),
+        filters.Regex('^(🔔 Включить уведомления|🔕 Выключить уведомления|◀️ Назад в меню|🕒 Время: ежедневно|🕒 Время: неделя|🕒 Время: месяц)$'),
         notifications.toggle_notifications
+    ))
+
+    application.add_handler(MessageHandler(
+        filters.Regex(r'^\d{2}:\d{2}$'),
+        notifications.set_notification_time_input
     ))
 
     # 12. Эхо-обработчик (последним)

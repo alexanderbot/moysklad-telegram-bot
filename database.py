@@ -73,11 +73,26 @@ class Database:
                     user_id INTEGER NOT NULL,
                     default_report_type TEXT DEFAULT 'today',
                     notification_enabled BOOLEAN DEFAULT 0,
+                    notification_daily_time TEXT DEFAULT '09:00',
+                    notification_weekly_time TEXT DEFAULT '09:05',
+                    notification_monthly_time TEXT DEFAULT '09:01',
                     timezone TEXT DEFAULT 'Europe/Moscow',
                     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE CASCADE
                 )
             ''')
+
+            settings_alter_statements = [
+                "ALTER TABLE user_settings ADD COLUMN notification_daily_time TEXT DEFAULT '09:00'",
+                "ALTER TABLE user_settings ADD COLUMN notification_weekly_time TEXT DEFAULT '09:05'",
+                "ALTER TABLE user_settings ADD COLUMN notification_monthly_time TEXT DEFAULT '09:01'",
+            ]
+            for stmt in settings_alter_statements:
+                try:
+                    cursor.execute(stmt)
+                except Exception:
+                    # Колонка уже есть или другая не критичная ошибка миграции — игнорируем
+                    pass
 
             # Таблица логов запросов
             cursor.execute('''
@@ -299,6 +314,39 @@ class Database:
             # Преобразуем Row объекты в кортежи
             return [(row['telegram_id'], row['api_token_encrypted']) for row in results]
 
+    def get_users_for_scheduled_report(self, period_type: str, target_time: str) -> list:
+        """
+        Получить список пользователей для конкретного автоотчета по времени.
+
+        period_type: yesterday | last_week | last_month
+        target_time: HH:MM
+        """
+        period_to_column = {
+            "yesterday": "notification_daily_time",
+            "last_week": "notification_weekly_time",
+            "last_month": "notification_monthly_time",
+        }
+        time_column = period_to_column.get(period_type)
+        if not time_column:
+            raise ValueError(f"Unsupported period_type: {period_type}")
+
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                f'''
+                SELECT u.telegram_id, u.api_token_encrypted
+                FROM users u
+                JOIN user_settings s ON u.id = s.user_id
+                WHERE s.notification_enabled = 1
+                  AND u.api_token_encrypted IS NOT NULL
+                  AND u.is_active = 1
+                  AND COALESCE(s.{time_column}, '') = ?
+                ''',
+                (target_time,)
+            )
+            rows = cursor.fetchall()
+            return [(row["telegram_id"], row["api_token_encrypted"]) for row in rows]
+
     def update_notification_setting(self, telegram_id: int, enabled: bool) -> bool:
         """
         Обновить настройку уведомлений для пользователя
@@ -360,6 +408,69 @@ class Database:
             if result:
                 return bool(result['notification_enabled'])
             return None
+
+    def get_notification_times(self, telegram_id: int) -> Optional[Dict[str, str]]:
+        """Получить времена автоуведомлений пользователя."""
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                '''
+                SELECT s.notification_daily_time,
+                       s.notification_weekly_time,
+                       s.notification_monthly_time
+                FROM users u
+                JOIN user_settings s ON u.id = s.user_id
+                WHERE u.telegram_id = ?
+                ''',
+                (telegram_id,)
+            )
+            row = cursor.fetchone()
+            if not row:
+                return None
+            return {
+                "daily": row["notification_daily_time"] or "09:00",
+                "weekly": row["notification_weekly_time"] or "09:05",
+                "monthly": row["notification_monthly_time"] or "09:01",
+            }
+
+    def update_notification_time(self, telegram_id: int, period_type: str, time_value: str) -> bool:
+        """
+        Обновить время уведомления по типу периода.
+
+        period_type: daily | weekly | monthly
+        time_value: HH:MM
+        """
+        period_to_column = {
+            "daily": "notification_daily_time",
+            "weekly": "notification_weekly_time",
+            "monthly": "notification_monthly_time",
+        }
+        column = period_to_column.get(period_type)
+        if not column:
+            raise ValueError(f"Unsupported period_type: {period_type}")
+
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT id FROM users WHERE telegram_id = ?", (telegram_id,))
+            user = cursor.fetchone()
+
+            if not user:
+                logger.warning(f"Пользователь {telegram_id} не найден")
+                return False
+
+            cursor.execute(
+                f'''
+                UPDATE user_settings
+                SET {column} = ?, updated_at = ?
+                WHERE user_id = ?
+                ''',
+                (time_value, now_moscow(), user['id'])
+            )
+
+            updated = cursor.rowcount > 0
+            if updated:
+                logger.info(f"Время уведомлений ({period_type}={time_value}) обновлено для пользователя {telegram_id}")
+            return updated
 
     def delete_user(self, telegram_id: int) -> bool:
         """

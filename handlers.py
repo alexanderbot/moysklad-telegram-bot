@@ -1559,6 +1559,15 @@ class NotificationHandlers:
     def __init__(self, db: Database):
         self.db = db
 
+    @staticmethod
+    def _validate_hhmm(value: str) -> str | None:
+        """Проверка и нормализация времени HH:MM."""
+        try:
+            parsed = datetime.strptime(value.strip(), "%H:%M")
+            return parsed.strftime("%H:%M")
+        except Exception:
+            return None
+
     async def notifications_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Показать статус уведомлений и кнопки управления"""
         user = update.effective_user
@@ -1575,6 +1584,11 @@ class NotificationHandlers:
         # Получаем текущий статус уведомлений
         notification_enabled = user_data.get('notification_enabled', 0)
         is_enabled = bool(notification_enabled)
+        times = self.db.get_notification_times(user.id) or {
+            "daily": "09:00",
+            "weekly": "09:05",
+            "monthly": "09:01",
+        }
 
         # Формируем текст сообщения
         status_emoji = "✅" if is_enabled else "❌"
@@ -1583,23 +1597,27 @@ class NotificationHandlers:
         message_text = (
             f"🔔 *Управление уведомлениями*\n\n"
             f"Статус: Уведомления {status_text} {status_emoji}\n\n"
+            f"*Текущее время отправки (МСК):*\n"
+            f"• Ежедневный отчет: `{times['daily']}`\n"
+            f"• Недельный отчет: `{times['weekly']}`\n"
+            f"• Месячный отчет: `{times['monthly']}`\n\n"
         )
         
         if is_enabled:
             message_text += (
                 "*Вы получаете автоматические отчеты:*\n"
-                "• Ежедневно в 9:00 - статистика за вчера\n"
-                "• Понедельник в 9:05 - статистика за неделю\n"
-                "• 1 число месяца в 9:00 - отчет за месяц\n\n"
-                "Используйте кнопку ниже для управления."
+                "• Ежедневно - статистика за вчера\n"
+                "• По понедельникам - статистика за неделю\n"
+                "• 1 числа месяца - отчет за прошлый месяц\n\n"
+                "Используйте кнопки ниже для управления временем."
             )
         else:
             message_text += (
                 "*При включении вы будете получать:*\n"
-                "• Ежедневно в 9:00 - статистика за вчера\n"
-                "• Понедельник в 9:05 - статистика за неделю\n"
-                "• 1 число месяца в 9:00 - отчет за месяц\n\n"
-                "Нажмите кнопку ниже, чтобы включить уведомления."
+                "• Ежедневно - статистика за вчера\n"
+                "• По понедельникам - статистика за неделю\n"
+                "• 1 числа месяца - отчет за прошлый месяц\n\n"
+                "Можно заранее настроить время для каждого типа отчета."
             )
 
         await update.message.reply_text(
@@ -1672,6 +1690,61 @@ class NotificationHandlers:
                 reply_markup=get_main_menu(is_registered),
                 parse_mode=ParseMode.MARKDOWN
             )
+
+        elif button_text in ("🕒 Время: ежедневно", "🕒 Время: неделя", "🕒 Время: месяц"):
+            button_to_period = {
+                "🕒 Время: ежедневно": ("daily", "ежедневного отчета"),
+                "🕒 Время: неделя": ("weekly", "недельного отчета"),
+                "🕒 Время: месяц": ("monthly", "месячного отчета"),
+            }
+            period_type, period_label = button_to_period[button_text]
+            context.user_data["awaiting_notification_time_type"] = period_type
+            await update.message.reply_text(
+                f"Введите время для {period_label} в формате `ЧЧ:ММ` (например, `09:30`).\n"
+                f"_Часовой пояс: Europe/Moscow_",
+                parse_mode=ParseMode.MARKDOWN,
+                reply_markup=get_notifications_keyboard(bool(user_data.get("notification_enabled", 0)))
+            )
+
+    async def set_notification_time_input(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Обработка ввода времени уведомлений (HH:MM)."""
+        user = update.effective_user
+        waiting_period = context.user_data.get("awaiting_notification_time_type")
+        if not waiting_period:
+            return
+
+        value = (update.message.text or "").strip()
+        normalized = self._validate_hhmm(value)
+        if not normalized:
+            await update.message.reply_text(
+                "❌ Неверный формат времени. Используйте `ЧЧ:ММ`, например `08:45`.",
+                parse_mode=ParseMode.MARKDOWN,
+                reply_markup=get_notifications_keyboard(bool(self.db.get_notification_status(user.id)))
+            )
+            return
+
+        success = self.db.update_notification_time(user.id, waiting_period, normalized)
+        if not success:
+            await update.message.reply_text(
+                "❌ Не удалось сохранить время уведомления. Попробуйте позже.",
+                reply_markup=get_notifications_keyboard(bool(self.db.get_notification_status(user.id)))
+            )
+            return
+
+        context.user_data.pop("awaiting_notification_time_type", None)
+        times = self.db.get_notification_times(user.id) or {
+            "daily": "09:00",
+            "weekly": "09:05",
+            "monthly": "09:01",
+        }
+        await update.message.reply_text(
+            "✅ Время уведомлений обновлено.\n\n"
+            f"• Ежедневный отчет: `{times['daily']}`\n"
+            f"• Недельный отчет: `{times['weekly']}`\n"
+            f"• Месячный отчет: `{times['monthly']}`",
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=get_notifications_keyboard(bool(self.db.get_notification_status(user.id)))
+        )
 
 
 class PaymentHandlers:

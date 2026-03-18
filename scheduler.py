@@ -12,9 +12,14 @@ from database import Database
 from moysklad_api import MoyskladAPI, get_period_dates
 from security import security
 from subscription import check_subscription, compute_days_left, is_superadmin
-from config import config, today_moscow
+from config import config, now_moscow, today_moscow
 
 logger = logging.getLogger(__name__)
+
+
+def _time_hhmm_moscow() -> str:
+    """Текущее московское время в формате HH:MM."""
+    return now_moscow().strftime("%H:%M")
 
 
 class StatisticsScheduler:
@@ -40,35 +45,35 @@ class StatisticsScheduler:
         """Запуск планировщика с настройкой всех задач"""
         logger.info("🚀 Запуск планировщика статистики...")
         
-        # Ежедневная статистика за вчера в 9:00
+        # Ежедневная статистика: проверка каждую минуту, отправка по времени пользователя
         self.scheduler.add_job(
             self._send_daily_report,
-            CronTrigger(hour=9, minute=0, timezone='Europe/Moscow'),
+            CronTrigger(minute='*', timezone='Europe/Moscow'),
             id='daily_stats',
             name='Ежедневная статистика',
             replace_existing=True
         )
-        logger.info("✅ Настроена ежедневная статистика (9:00)")
+        logger.info("✅ Настроена ежедневная статистика (каждую минуту с фильтром по времени)")
         
-        # Недельная статистика по понедельникам в 9:05
+        # Недельная статистика: по понедельникам, проверка каждую минуту
         self.scheduler.add_job(
             self._send_weekly_report,
-            CronTrigger(day_of_week='mon', hour=9, minute=5, timezone='Europe/Moscow'),
+            CronTrigger(day_of_week='mon', minute='*', timezone='Europe/Moscow'),
             id='weekly_stats',
             name='Недельная статистика',
             replace_existing=True
         )
-        logger.info("✅ Настроена недельная статистика (понедельник 9:05)")
+        logger.info("✅ Настроена недельная статистика (понедельник, каждую минуту с фильтром по времени)")
         
-        # Месячная статистика 1 числа в 9:00
+        # Месячная статистика: 1 числа, проверка каждую минуту
         self.scheduler.add_job(
             self._send_monthly_report,
-            CronTrigger(day=1, hour=9, minute=1, timezone='Europe/Moscow'),
+            CronTrigger(day=1, minute='*', timezone='Europe/Moscow'),
             id='monthly_stats',
             name='Месячная статистика',
             replace_existing=True
         )
-        logger.info("✅ Настроена месячная статистика (1 число 9:00)")
+        logger.info("✅ Настроена месячная статистика (1 число, каждую минуту с фильтром по времени)")
 
         # Ежедневная проверка подписок и напоминаний в 9:10
         self.scheduler.add_job(
@@ -92,7 +97,7 @@ class StatisticsScheduler:
 
     async def _send_daily_report(self):
         """Отправка ежедневного отчета за вчера"""
-        logger.info("📊 Начало отправки ежедневных отчетов...")
+        logger.info("📊 Проверка ежедневной рассылки...")
         
         # Получаем даты за вчера
         date_from, date_to = get_period_dates('yesterday')
@@ -106,7 +111,7 @@ class StatisticsScheduler:
 
     async def _send_weekly_report(self):
         """Отправка недельного отчета за прошлую неделю"""
-        logger.info("📊 Начало отправки недельных отчетов...")
+        logger.info("📊 Проверка недельной рассылки...")
         
         # Получаем даты за прошлую неделю
         date_from, date_to = get_period_dates('last_week')
@@ -120,7 +125,7 @@ class StatisticsScheduler:
 
     async def _send_monthly_report(self):
         """Отправка месячного отчета за прошлый месяц"""
-        logger.info("📊 Начало отправки месячных отчетов...")
+        logger.info("📊 Проверка месячной рассылки...")
         
         # Получаем даты за прошлый месяц
         date_from, date_to = get_period_dates('last_month')
@@ -147,14 +152,15 @@ class StatisticsScheduler:
             report_title: Заголовок отчета
         """
         try:
-            # Получаем пользователей с включенными уведомлениями
-            users = self.db.get_users_with_notifications()
+            # Получаем текущее время по Москве и фильтруем пользователей по их настройке
+            current_time = _time_hhmm_moscow()
+            users = self.db.get_users_for_scheduled_report(period_type, current_time)
             
             if not users:
-                logger.info("ℹ️ Нет пользователей с включенными уведомлениями")
+                logger.info(f"ℹ️ Нет пользователей для {period_type} на время {current_time}")
                 return
             
-            logger.info(f"📤 Отправка отчетов {len(users)} пользователям...")
+            logger.info(f"📤 Отправка {period_type} отчетов {len(users)} пользователям (время {current_time})...")
             
             success_count = 0
             error_count = 0
