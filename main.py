@@ -1,6 +1,6 @@
 import logging
 import os
-import asyncio
+import time
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -13,6 +13,7 @@ from telegram.ext import (
 )
 from telegram import Update
 from telegram.constants import ParseMode
+from telegram.error import NetworkError, TimedOut
 
 from config import config
 from database import init_database
@@ -367,34 +368,59 @@ def main():
     else:
         logger.warning("Оплата через Telegram: отключена (TELEGRAM_PROVIDER_TOKEN не задан в .env)")
 
-    # Создание приложения бота
-    application = Application.builder().token(config.BOT_TOKEN).build()
-
-    # Настройка обработчиков
-    setup_handlers(application, db)
-
-    # Инициализация и запуск планировщика
-    logger.info("Initializing statistics scheduler...")
-    scheduler = StatisticsScheduler(
-        application=application,
-        db=db,
-        api_factory=lambda token: MoyskladAPI(token)
-    )
-    scheduler.start()
-    logger.info("Statistics scheduler started successfully")
-
-    # Запуск бота
-    logger.info("Bot starting...")
-    try:
-        application.run_polling(allowed_updates=None)
-    except KeyboardInterrupt:
-        logger.info("Received interrupt signal, shutting down...")
-    finally:
+    retry_count = 0
+    while True:
+        scheduler = None
         try:
-            scheduler.stop()
-        except RuntimeError:
-            logger.warning("Планировщик уже не может корректно остановиться: event loop закрыт")
-        logger.info("Bot stopped")
+            # Создание приложения бота
+            application = Application.builder().token(config.BOT_TOKEN).build()
+
+            # Настройка обработчиков
+            setup_handlers(application, db)
+
+            # Инициализация и запуск планировщика
+            logger.info("Initializing statistics scheduler...")
+            scheduler = StatisticsScheduler(
+                application=application,
+                db=db,
+                api_factory=lambda token: MoyskladAPI(token)
+            )
+            scheduler.start()
+            logger.info("Statistics scheduler started successfully")
+
+            # Запуск бота с увеличенными таймаутами
+            logger.info("Bot starting...")
+            application.run_polling(
+                allowed_updates=None,
+                bootstrap_retries=3,
+                timeout=30,
+                connect_timeout=30,
+                read_timeout=30,
+                write_timeout=30,
+                pool_timeout=30,
+            )
+            logger.info("Bot stopped gracefully")
+            break
+
+        except KeyboardInterrupt:
+            logger.info("Received interrupt signal, shutting down...")
+            break
+        except (TimedOut, NetworkError) as e:
+            retry_count += 1
+            delay_seconds = min(60, 5 * retry_count)
+            logger.warning(
+                "Сетевой сбой Telegram API (%s). Повторный запуск через %s сек. (попытка %s)",
+                type(e).__name__,
+                delay_seconds,
+                retry_count
+            )
+            time.sleep(delay_seconds)
+        finally:
+            if scheduler:
+                try:
+                    scheduler.stop()
+                except RuntimeError:
+                    logger.warning("Планировщик уже не может корректно остановиться: event loop закрыт")
 
 
 if __name__ == '__main__':
